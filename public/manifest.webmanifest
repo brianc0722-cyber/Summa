@@ -1,0 +1,27 @@
+{
+  "name": "Summa — Summarize any page",
+  "short_name": "Summa",
+  "description": "One button that summarizes any page on the internet. Runs locally, free, no account, no tracking.",
+  "id": ".",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f1f3ee",
+  "theme_color": "#0c1a16",
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
