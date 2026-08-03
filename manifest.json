@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Summa — Summarize any page",
+  "short_name": "Summa",
+  "version": "1.1.0",
+  "description": "One click summarizes any page: 5 main points plus a full non-redundant summary. Runs locally in your browser — no account, no tracking, works on Gmail and other CSP-locked sites.",
+  "action": {
+    "default_title": "Summarize this page"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["<all_urls>"]
+}
