@@ -11,10 +11,23 @@ import {
   GitBranch,
   Package,
   FolderOpen,
+  Upload,
+  Link2,
+  FileUp,
+  Sparkles,
+  BarChart3,
+  TrendingUp,
+  AlertTriangle,
+  Compass,
+  ChevronDown,
+  Newspaper,
+  Mail,
+  RefreshCw,
 } from "lucide-react";
 import { WIDGET_SOURCE, buildBookmarkletHref } from "./lib/bookmarkletSource";
 import { buildExtensionZip } from "./lib/extensionBundle";
 import { readTime, scanDocument, wordCount } from "./lib/summarize";
+import { deriveInsights, type InsightSet } from "./lib/insights";
 import JSZip from "jszip";
 
 /* ---------------- Reveal-on-scroll (failsafe) ---------------- */
@@ -169,6 +182,487 @@ const SAMPLE = {
   body: `Radiology departments around the world are facing an unprecedented workload. The number of imaging studies ordered each year has grown far faster than the supply of trained radiologists, leading to fatigue, burnout, and diagnostic delays. Into this gap stepped a new generation of machine learning models trained on millions of annotated scans. These systems do not replace radiologists; instead, they act as a tireless second reader, flagging subtle anomalies that a tired human eye might miss after a twelve-hour shift. In controlled trials, radiologists working alongside such models detected early-stage lung nodules at significantly higher rates than either the model or the physician alone. The most successful deployments treat the algorithm as a triage tool, pushing the most suspicious cases to the top of the worklist so that urgent patients are seen first. Skeptics rightly point out that models can inherit biases from their training data and may fail silently on equipment they have never seen. As a result, regulators now demand continuous monitoring and clear accountability for every automated suggestion. The emerging consensus is that the future of radiology is neither human nor machine, but a careful partnership in which each covers the other's blind spots.`,
 };
 
+/* ---------------- Document extractors (loaded on demand from CDN) ---------------- */
+
+const PASTE_WORD_CAP = 7500;
+const scriptCache: Record<string, Promise<void>> = {};
+
+function loadScript(src: string): Promise<void> {
+  if (!scriptCache[src]) {
+    scriptCache[src] = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = src;
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error("loader"));
+      document.head.appendChild(s);
+    });
+  }
+  return scriptCache[src];
+}
+
+async function extractPdf(file: File): Promise<string> {
+  await loadScript("https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const pdfjs = (window as any).pdfjsLib;
+  pdfjs.GlobalWorkerOptions.workerSrc =
+    "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+  const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+  let text = "";
+  for (let i = 1; i <= doc.numPages; i++) {
+    const page = await doc.getPage(i);
+    const content = await page.getTextContent();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    text += content.items.map((it: any) => it.str || "").join(" ") + "\n";
+  }
+  return text;
+}
+
+async function extractDocx(file: File): Promise<string> {
+  await loadScript("https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js");
+  const mammoth = (window as unknown as { mammoth: { extractRawText: (o: { arrayBuffer: ArrayBuffer }) => Promise<{ value: string }> } }).mammoth;
+  const res = await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() });
+  return res.value;
+}
+
+/* ---------------- Workbench samples ---------------- */
+
+const WB_SAMPLES: Record<string, { label: string; icon: typeof Newspaper; title: string; body: string }> = {
+  news: { label: "News article", icon: Newspaper, title: SAMPLE.title, body: SAMPLE.body },
+  report: {
+    label: "Data report",
+    icon: BarChart3,
+    title: "Q3 Infrastructure Report",
+    body: `The regional transit authority closed the third quarter with 41.2 million boardings, a 6.8 percent increase over the same period last year and the strongest result since 2019. Farebox recovery reached 54 percent, up from 47 percent, driven primarily by the return of weekday commuters to the downtown core. On-time performance, however, declined to 82.4 percent, the lowest figure in nine quarters. The deterioration concentrated on the two busiest rail lines, where aging signal equipment caused 312 separate delays totaling 1,840 minutes of lost service time. Maintenance spending rose 18 percent to $96 million, yet the backlog of deferred repairs grew to $1.4 billion, up from $1.2 billion at the start of the year. Ridership surveys show 68 percent of passengers rate cleanliness as good or excellent, while only 41 percent say the same about reliability. The board will consider a fare adjustment of between 3 and 5 percent at its December meeting, though three members have publicly opposed any increase before service quality improves. A federal grant of $220 million for signal modernization remains pending, with a decision expected before the end of the fiscal year. Without it, officials warn that on-time performance could fall below 80 percent by next summer.`,
+  },
+  email: {
+    label: "Email thread",
+    icon: Mail,
+    title: "Re: Launch timeline",
+    body: `Thanks for the update, team. I want to flag a few things before we commit to the March 14 launch. The payments integration is still failing intermittently in staging — roughly 1 in 40 transactions — and the vendor says a fix is at least two weeks out. Marketing has already scheduled the announcement email for March 12, so slipping means re-coordinating with three external partners. That said, the beta cohort of 240 users gave the new onboarding flow a 4.6 out of 5 satisfaction score, and support tickets from beta dropped 30 percent week over week, which tells me the core product is genuinely ready. My recommendation: keep the March 14 date for the product launch, but gate payments behind a waitlist for the first two weeks and offer those users three months free as compensation. Please review the attached risk table and reply with your vote by Thursday at 5pm so we can brief leadership on Friday. Thanks, Dana`,
+  },
+};
+
+/* ---------------- Workbench ---------------- */
+
+type WbMode = "paste" | "url" | "file";
+
+function Workbench() {
+  const [mode, setMode] = useState<WbMode>("paste");
+  const [text, setText] = useState("");
+  const [url, setUrl] = useState("");
+  const [urlState, setUrlState] = useState<"idle" | "loading" | "error">("idle");
+  const [source, setSource] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [runKey, setRunKey] = useState(0);
+  const [expanded, setExpanded] = useState<number | null>(null);
+  const [result, setResult] = useState<{
+    title: string;
+    points: string[];
+    details: string[];
+    folded: number;
+    insights: InsightSet;
+  } | null>(null);
+
+  const runAnalysis = (t: string, label: string) => {
+    setBusy(true);
+    setExpanded(null);
+    window.setTimeout(() => {
+      const scan = scanDocument(t, 5, label);
+      setResult({
+        title: label,
+        points: scan.points,
+        details: scan.details,
+        folded: scan.folded,
+        insights: deriveInsights(t, scan.points, scan.details),
+      });
+      setRunKey((k) => k + 1);
+      setBusy(false);
+    }, 650);
+  };
+
+  const runFromText = () => {
+    if (text.trim().length < 120) return;
+    setSource(null);
+    runAnalysis(text, "Pasted material");
+  };
+
+  const runFromUrl = async () => {
+    let u = url.trim();
+    if (!u) return;
+    if (!/^https?:\/\//i.test(u)) u = "https://" + u;
+    setUrlState("loading");
+    try {
+      const res = await fetch(u);
+      if (!res.ok) throw new Error("http");
+      const html = await res.text();
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      doc.querySelectorAll("script,style,noscript,nav,footer,aside").forEach((n) => n.remove());
+      const t = (doc.body?.textContent || "").replace(/\s+/g, " ").trim();
+      if (t.length < 200) throw new Error("thin");
+      setText(t);
+      setSource(u);
+      setUrlState("idle");
+      runAnalysis(t, new URL(u).hostname.replace(/^www\./, ""));
+    } catch {
+      setUrlState("error");
+    }
+  };
+
+  const onFile = (f: File | null) => {
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      let t = String(reader.result || "");
+      if (/\.html?$/i.test(f.name)) {
+        t = t
+          .replace(/<script[\s\S]*?<\/script>/gi, " ")
+          .replace(/<style[\s\S]*?<\/style>/gi, " ")
+          .replace(/<[^>]+>/g, " ");
+      }
+      setText(t);
+      setSource(f.name);
+      runAnalysis(t, f.name);
+    };
+    reader.readAsText(f);
+  };
+
+  const ins = result?.insights;
+
+  const insightCards = ins
+    ? [
+        {
+          icon: BarChart3,
+          tone: "text-[#0a5c49] bg-[#0f8a6d]/12 border-[#0f8a6d]/40",
+          title: "By the numbers",
+          sub: "The figures that anchor this material",
+          items: ins.numbers,
+          empty: "No concrete figures detected.",
+        },
+        {
+          icon: AlertTriangle,
+          tone: "text-[#a86f1a] bg-[#e8a33d]/12 border-[#e8a33d]/50",
+          title: "Tensions & turning points",
+          sub: "Where the story pushes back on itself",
+          items: ins.tensions,
+          empty: "No competing forces flagged.",
+        },
+        {
+          icon: TrendingUp,
+          tone: "text-[#2f5fb8] bg-[#4a90e0]/10 border-[#4a90e0]/40",
+          title: "What comes next",
+          sub: "Forward-looking moves and intentions",
+          items: ins.actions,
+          empty: "No forward-looking statements found.",
+        },
+      ]
+    : [];
+
+  return (
+    <section id="workbench" className="reveal pb-20">
+      <div className="overflow-hidden rounded-2xl border-2 border-[#0c1a16] bg-white shadow-[10px_10px_0_#0c1a16]">
+        {/* Console header */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b-2 border-[#0c1a16] bg-[#0c1a16] px-6 py-5 sm:px-8">
+          <div>
+            <p className="mb-1 flex items-center gap-2 text-[10px] font-extrabold uppercase tracking-[0.2em] text-[#e8a33d]">
+              <Sparkles size={12} fill="currentColor" /> The Workbench
+            </p>
+            <h2 className="font-display text-2xl font-extrabold text-[#f1f3ee] sm:text-3xl">
+              Bring your own material
+            </h2>
+          </div>
+          <p className="max-w-xs text-xs leading-relaxed text-[#f1f3ee]/60">
+            Paste a report, drop a transcript, or feed a URL — Summa returns the points, the full
+            summary, and derived insights. All on this page; the extension is untouched.
+          </p>
+        </div>
+
+        <div className="grid gap-0 lg:grid-cols-[1fr_1.15fr]">
+          {/* Input side */}
+          <div className="border-b-2 border-[#0c1a16] p-6 sm:p-7 lg:border-b-0 lg:border-r-2">
+            <div className="mb-4 flex gap-1.5">
+              {(
+                [
+                  { id: "paste", label: "Paste text", icon: Upload },
+                  { id: "url", label: "From URL", icon: Link2 },
+                  { id: "file", label: "Upload file", icon: FileUp },
+                ] as { id: WbMode; label: string; icon: typeof Upload }[]
+              ).map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => {
+                    setMode(t.id);
+                    setUrlState("idle");
+                  }}
+                  className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-bold transition-all ${
+                    mode === t.id
+                      ? "bg-[#0c1a16] text-[#f1f3ee] shadow-sm"
+                      : "bg-[#f7f9f5] text-[#0c1a16]/60 hover:bg-[#eef1ea] hover:text-[#0c1a16]"
+                  }`}
+                >
+                  <t.icon size={13} /> {t.label}
+                </button>
+              ))}
+            </div>
+
+            {mode === "paste" && (
+              <>
+                <textarea
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  rows={9}
+                  placeholder="Paste an article, report, transcript, email thread — anything with words in it…"
+                  className="w-full resize-y rounded-xl border border-[#0c1a16]/20 bg-[#f7f9f5] p-4 text-sm leading-relaxed text-[#0c1a16]/80 outline-none transition focus:border-[#0f8a6d] focus:ring-4 focus:ring-[#0f8a6d]/15"
+                />
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <span className="text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#0c1a16]/45">
+                    Try a sample:
+                  </span>
+                  {Object.entries(WB_SAMPLES).map(([k, s]) => (
+                    <button
+                      key={k}
+                      onClick={() => {
+                        setText(s.body);
+                        setSource(null);
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-[#0c1a16]/20 bg-white px-3 py-1 text-xs font-semibold text-[#0c1a16]/70 transition-all hover:-translate-y-0.5 hover:border-[#0f8a6d] hover:text-[#0f8a6d]"
+                    >
+                      <s.icon size={11} /> {s.label}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  onClick={runFromText}
+                  disabled={text.trim().length < 120}
+                  className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#0f8a6d] py-3.5 font-bold text-white shadow-[0_10px_26px_rgba(15,138,109,0.35)] transition-all hover:-translate-y-0.5 hover:bg-[#0a5c49] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
+                >
+                  <Sparkles size={16} /> Analyze & generate insights
+                </button>
+              </>
+            )}
+
+            {mode === "url" && (
+              <>
+                <div className="flex gap-2">
+                  <input
+                    value={url}
+                    onChange={(e) => setUrl(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && runFromUrl()}
+                    type="url"
+                    placeholder="https://en.wikipedia.org/wiki/…"
+                    className="flex-1 rounded-xl border border-[#0c1a16]/20 bg-[#f7f9f5] px-4 py-3 text-sm outline-none transition focus:border-[#0f8a6d] focus:ring-4 focus:ring-[#0f8a6d]/15"
+                  />
+                  <button
+                    onClick={runFromUrl}
+                    disabled={!url.trim() || urlState === "loading"}
+                    className="rounded-xl bg-[#0f8a6d] px-5 font-bold text-white transition-all hover:bg-[#0a5c49] disabled:opacity-40"
+                  >
+                    {urlState === "loading" ? "…" : "Fetch"}
+                  </button>
+                </div>
+                {urlState === "error" && (
+                  <p className="mt-3 rounded-lg border-l-4 border-[#e8695a] bg-[#e8695a]/10 p-3 text-xs leading-relaxed text-[#b3402f]">
+                    That site blocks browser-only fetching (or needs JavaScript to render). Paste
+                    its text instead, or use the extension's <strong>From URL</strong> — extensions
+                    bypass this limit.
+                  </p>
+                )}
+                <p className="mt-3 text-xs leading-relaxed text-[#0c1a16]/55">
+                  Works best with CORS-open sources (Wikipedia, public APIs, your own sites).
+                  Nothing is sent to a server beyond the direct request to the page itself.
+                </p>
+              </>
+            )}
+
+            {mode === "file" && (
+              <label className="flex cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed border-[#0c1a16]/25 bg-[#f7f9f5] px-6 py-12 text-center transition-all hover:border-[#0f8a6d] hover:bg-[#0f8a6d]/5">
+                <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-[#0f8a6d]/12 text-[#0a5c49]">
+                  <FileUp size={22} />
+                </span>
+                <span className="text-sm font-bold text-[#0c1a16]">
+                  Drop a .txt, .md, or .html file
+                </span>
+                <span className="text-xs text-[#0c1a16]/50">
+                  Transcripts, exports, saved articles — read instantly, never uploaded.
+                </span>
+                <input
+                  type="file"
+                  accept=".txt,.md,.markdown,.text,.html,.htm"
+                  className="hidden"
+                  onChange={(e) => onFile(e.target.files?.[0] || null)}
+                />
+              </label>
+            )}
+
+            {source && (
+              <p className="mt-3 flex items-center gap-1.5 text-xs font-semibold text-[#0f8a6d]">
+                <Link2 size={12} /> Source: <span className="truncate">{source}</span>
+              </p>
+            )}
+          </div>
+
+          {/* Results side */}
+          <div className="relative min-h-[420px] bg-[#f7f9f5] p-6 sm:p-7">
+            {busy && (
+              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[#f7f9f5]/90">
+                <div className="h-1 w-48 overflow-hidden rounded-full bg-[#0c1a16]/10">
+                  <div className="h-full w-1/2 rounded-full bg-[#0f8a6d]" style={{ animation: "wb-slide 1.1s ease-in-out infinite" }} />
+                </div>
+                <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#0c1a16]/50">
+                  Scanning & deriving insights…
+                </p>
+              </div>
+            )}
+
+            {!result && !busy && (
+              <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
+                <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[#0c1a16] text-[#e8a33d]">
+                  <Compass size={26} />
+                </span>
+                <div>
+                  <p className="font-display text-lg font-extrabold text-[#0c1a16]">
+                    Your analysis lands here
+                  </p>
+                  <p className="mt-1 max-w-xs text-sm text-[#0c1a16]/55">
+                    5 main points, a full non-redundant summary, and four insight angles —
+                    expanded point by point.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {result && !busy && (
+              <div key={runKey} className="space-y-6">
+                {/* Stats */}
+                <div className="point-in flex flex-wrap gap-2" style={{ animationDelay: "0.05s" }}>
+                  {[
+                    [`${ins!.stats.words.toLocaleString()}`, "words"],
+                    [`${ins!.stats.sentences}`, "sentences"],
+                    [`${ins!.stats.readMins} min`, "read time"],
+                    [`${result.points.length}`, "main points"],
+                  ].map(([v, l]) => (
+                    <span key={l} className="rounded-full bg-white px-3 py-1 text-xs font-bold text-[#0c1a16]/70 shadow-sm">
+                      <span className="font-display text-sm font-extrabold text-[#0f8a6d]">{v}</span>{" "}
+                      {l}
+                    </span>
+                  ))}
+                </div>
+
+                {/* Points with expand */}
+                <ol className="space-y-2.5">
+                  {result.points.map((p, i) => (
+                    <li key={i} className="point-in" style={{ animationDelay: `${0.15 + i * 0.12}s` }}>
+                      <button
+                        onClick={() => setExpanded(expanded === i ? null : i)}
+                        className="group flex w-full items-start gap-3 rounded-xl border border-[#0c1a16]/10 bg-white p-3.5 text-left transition-all hover:-translate-y-0.5 hover:border-[#0f8a6d]/50 hover:shadow-md"
+                      >
+                        <span className="mt-0.5 flex h-6 w-6 flex-none items-center justify-center rounded-md bg-[#0c1a16] text-xs font-extrabold text-[#e8a33d]">
+                          {i + 1}
+                        </span>
+                        <span className="flex-1 text-sm font-medium leading-relaxed text-[#0c1a16]/85">
+                          {p}
+                        </span>
+                        <ChevronDown
+                          size={15}
+                          className={`mt-1 flex-none text-[#0c1a16]/35 transition-transform group-hover:text-[#0f8a6d] ${
+                            expanded === i ? "rotate-180" : ""
+                          }`}
+                        />
+                      </button>
+                      {expanded === i && (
+                        <div className="panel-in ml-9 mt-2 rounded-xl border-l-4 border-[#0f8a6d] bg-[#0f8a6d]/8 p-3.5">
+                          {result.insights.support[i]?.length ? (
+                            <>
+                              <p className="mb-2 text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#0a5c49]">
+                                Supporting context
+                              </p>
+                              <ul className="space-y-1.5">
+                                {result.insights.support[i].map((s, j) => (
+                                  <li key={j} className="text-xs leading-relaxed text-[#0c1a16]/70">
+                                    • {s}
+                                  </li>
+                                ))}
+                              </ul>
+                            </>
+                          ) : (
+                            <p className="text-xs italic text-[#0c1a16]/50">
+                              No additional supporting sentences — this point stands on its own.
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  ))}
+                </ol>
+
+                {/* Insight cards */}
+                <div className="grid gap-3 sm:grid-cols-3">
+                  {insightCards.map((c, i) => (
+                    <div
+                      key={c.title}
+                      className={`point-in rounded-xl border p-4 transition-transform hover:-translate-y-1 ${c.tone}`}
+                      style={{ animationDelay: `${0.8 + i * 0.12}s` }}
+                    >
+                      <p className="mb-2 flex items-center gap-1.5 text-[10px] font-extrabold uppercase tracking-[0.12em]">
+                        <c.icon size={13} /> {c.title}
+                      </p>
+                      {c.items.length ? (
+                        <ul className="space-y-1.5">
+                          {c.items.map((s, j) => (
+                            <li key={j} className="text-[11px] leading-relaxed text-[#0c1a16]/75">
+                              • {s.length > 140 ? s.slice(0, 140) + "…" : s}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="text-[11px] italic text-[#0c1a16]/45">{c.empty}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {/* Themes */}
+                <div className="point-in" style={{ animationDelay: "1.15s" }}>
+                  <p className="mb-2 text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#0c1a16]/50">
+                    Dominant themes
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {ins!.terms.map((t) => (
+                      <span
+                        key={t.word}
+                        className="rounded-full bg-[#0c1a16] px-2.5 py-1 text-[11px] font-bold text-[#f1f3ee]"
+                        style={{ opacity: 0.5 + Math.min(0.5, t.count / 12) }}
+                      >
+                        {t.word} <span className="text-[#e8a33d]">{t.count}</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Full summary */}
+                {result.details.length > 0 && (
+                  <div className="point-in rounded-xl border border-[#e8a33d]/50 bg-[#e8a33d]/10 p-4" style={{ animationDelay: "1.3s" }}>
+                    <p className="mb-2 text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#a86f1a]">
+                      Full summary — everything else that matters
+                    </p>
+                    <p className="text-justify text-sm leading-relaxed text-[#0c1a16]/75">
+                      {result.details.join(" ")}
+                    </p>
+                    {result.folded > 0 && (
+                      <p className="mt-2 text-xs italic text-[#0c1a16]/50">
+                        +{result.folded} more supporting sentences folded in.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 /* ---------------- Site ---------------- */
 
 function Site() {
@@ -196,6 +690,61 @@ function Site() {
     []
   );
   const [scanKey, setScanKey] = useState(0);
+
+  /* "Watch it scan" — your-own-material input (paste ≤7.5k words, or any-length file) */
+  const [proofMode, setProofMode] = useState<"sample" | "paste" | "file">("sample");
+  const [proofText, setProofText] = useState("");
+  const [proofBusy, setProofBusy] = useState(false);
+  const [proofNote, setProofNote] = useState<string | null>(null);
+  const [proofKey, setProofKey] = useState(0);
+  const [proofResult, setProofResult] = useState<{
+    title: string;
+    words: number;
+    points: string[];
+    details: string[];
+    folded: number;
+  } | null>(null);
+
+  const proofWords = wordCount(proofText);
+  const overCap = proofWords > PASTE_WORD_CAP;
+
+  const runProof = (text: string, title: string) => {
+    setProofBusy(true);
+    setProofNote(null);
+    window.setTimeout(() => {
+      const scan = scanDocument(text, 5, title);
+      setProofResult({
+        title,
+        words: wordCount(text),
+        points: scan.points,
+        details: scan.details,
+        folded: scan.folded,
+      });
+      setProofKey((k) => k + 1);
+      setProofBusy(false);
+    }, 700);
+  };
+
+  const onProofFile = async (file: File | null) => {
+    if (!file) return;
+    setProofBusy(true);
+    setProofNote(null);
+    try {
+      let text = "";
+      if (/\.pdf$/i.test(file.name)) text = await extractPdf(file);
+      else if (/\.docx$/i.test(file.name)) text = await extractDocx(file);
+      else text = await file.text();
+      text = text.replace(/\s+/g, " ").trim();
+      if (text.length < 120) throw new Error("too short");
+      setProofMode("file");
+      runProof(text, file.name);
+    } catch {
+      setProofBusy(false);
+      setProofNote(
+        "Couldn't read that file — is it a text-based .txt, .pdf, or .docx? Scanned-image PDFs have no selectable text."
+      );
+    }
+  };
 
   const taRef = useRef<HTMLTextAreaElement>(null);
   const [selected, setSelected] = useState(false);
@@ -404,6 +953,12 @@ function Site() {
           </span>
           <span className="flex items-center gap-2">
             <a
+              href="#workbench"
+              className="hidden items-center gap-1.5 rounded-full border border-[#0c1a16]/20 bg-white px-3 py-1.5 text-xs font-bold text-[#0c1a16]/70 transition-all hover:-translate-y-0.5 hover:border-[#0f8a6d] hover:text-[#0f8a6d] sm:inline-flex"
+            >
+              <Sparkles size={12} /> Workbench
+            </a>
+            <a
               href="#deploy"
               className="hidden items-center gap-1.5 rounded-full border border-[#0c1a16]/20 bg-white px-3 py-1.5 text-xs font-bold text-[#0c1a16]/70 transition-all hover:-translate-y-0.5 hover:border-[#e8a33d] hover:text-[#a86f1a] sm:inline-flex"
             >
@@ -478,7 +1033,7 @@ function Site() {
                 Step one · nothing to install
               </p>
               <h2 className="font-display text-3xl font-extrabold tracking-tight sm:text-4xl">
-                Watch it scan a real article
+                Watch it scan — the sample, or your own words
               </h2>
             </div>
             <div className="flex gap-2">
@@ -505,6 +1060,109 @@ function Site() {
             </p>
           )}
 
+          {/* Your-material tabs */}
+          <div className="mb-6 overflow-hidden rounded-2xl border-2 border-[#0c1a16] bg-white shadow-[8px_8px_0_#0c1a16]">
+            <div className="flex flex-wrap gap-1 border-b-2 border-[#0c1a16] bg-[#0c1a16] p-2">
+              {(
+                [
+                  { id: "sample", label: "Watch the sample" },
+                  { id: "paste", label: "Paste your own" },
+                  { id: "file", label: "Upload a file" },
+                ] as { id: typeof proofMode; label: string }[]
+              ).map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => setProofMode(t.id)}
+                  className={`rounded-lg px-3.5 py-2 text-xs font-bold transition-all ${
+                    proofMode === t.id
+                      ? "bg-[#e8a33d] text-[#0c1a16]"
+                      : "text-[#f1f3ee]/60 hover:bg-[#f1f3ee]/10 hover:text-[#f1f3ee]"
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+              <span className="ml-auto hidden self-center pr-2 text-[10px] font-semibold text-[#f1f3ee]/45 sm:block">
+                paste ≤ {PASTE_WORD_CAP.toLocaleString()} words · files any length
+              </span>
+            </div>
+
+            {proofMode === "paste" && (
+              <div className="p-5">
+                <textarea
+                  value={proofText}
+                  onChange={(e) => setProofText(e.target.value)}
+                  rows={6}
+                  placeholder="Paste up to 7,500 words — an article, essay, report, anything…"
+                  className="w-full resize-y rounded-xl border border-[#0c1a16]/20 bg-[#f7f9f5] p-4 text-sm leading-relaxed text-[#0c1a16]/80 outline-none transition focus:border-[#0f8a6d] focus:ring-4 focus:ring-[#0f8a6d]/15"
+                />
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <div className="h-1.5 w-40 overflow-hidden rounded-full bg-[#0c1a16]/10">
+                    <div
+                      className={`h-full rounded-full transition-all ${overCap ? "bg-[#e8695a]" : "bg-[#0f8a6d]"}`}
+                      style={{ width: `${Math.min(100, (proofWords / PASTE_WORD_CAP) * 100)}%` }}
+                    />
+                  </div>
+                  <span className={`text-xs font-bold ${overCap ? "text-[#b3402f]" : "text-[#0c1a16]/55"}`}>
+                    {proofWords.toLocaleString()} / {PASTE_WORD_CAP.toLocaleString()} words
+                  </span>
+                  <button
+                    onClick={() => runProof(proofText, "Your pasted material")}
+                    disabled={proofBusy || proofWords < 40 || overCap}
+                    className="ml-auto inline-flex items-center gap-2 rounded-full bg-[#0f8a6d] px-5 py-2.5 text-sm font-bold text-white shadow-[0_8px_20px_rgba(15,138,109,0.35)] transition-all hover:-translate-y-0.5 hover:bg-[#0a5c49] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
+                  >
+                    <Bolt size={14} fill="currentColor" />
+                    {proofBusy ? "Scanning…" : "Scan my text"}
+                  </button>
+                </div>
+                {overCap && (
+                  <p className="mt-2 text-xs font-semibold text-[#b3402f]">
+                    Over the paste limit — switch to <strong>Upload a file</strong> for longer
+                    material (.txt, .pdf, .docx have no cap).
+                  </p>
+                )}
+              </div>
+            )}
+
+            {proofMode === "file" && (
+              <div className="p-5">
+                <label className="flex cursor-pointer flex-col items-center justify-center gap-2.5 rounded-xl border-2 border-dashed border-[#0c1a16]/25 bg-[#f7f9f5] px-6 py-8 text-center transition-all hover:border-[#0f8a6d] hover:bg-[#0f8a6d]/5">
+                  <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#0f8a6d]/12 text-[#0a5c49]">
+                    {proofBusy ? <RefreshCw size={20} className="animate-spin" /> : <FileUp size={20} />}
+                  </span>
+                  <span className="text-sm font-bold text-[#0c1a16]">
+                    {proofBusy ? "Reading your document…" : "Drop or choose a .txt, .pdf, or .docx"}
+                  </span>
+                  <span className="text-xs text-[#0c1a16]/50">
+                    Any length — parsed right here in your browser, never uploaded.
+                  </span>
+                  <input
+                    type="file"
+                    accept=".txt,.md,.text,.pdf,.docx"
+                    className="hidden"
+                    disabled={proofBusy}
+                    onChange={(e) => onProofFile(e.target.files?.[0] || null)}
+                  />
+                </label>
+                {proofNote && (
+                  <p className="mt-3 rounded-lg border-l-4 border-[#e8695a] bg-[#e8695a]/10 p-3 text-xs leading-relaxed text-[#b3402f]">
+                    {proofNote}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {proofMode === "sample" && (
+              <p className="px-5 py-3.5 text-xs leading-relaxed text-[#0c1a16]/55">
+                The scanner runs on the article below by default. Flip to{" "}
+                <strong className="text-[#0c1a16]">Paste your own</strong> or{" "}
+                <strong className="text-[#0c1a16]">Upload a file</strong> to tailor a summary from
+                your material instead.
+              </p>
+            )}
+          </div>
+
+          {(proofMode === "sample" || !proofResult) ? (
           <article className="relative overflow-hidden rounded-2xl border border-[#0c1a16]/12 bg-white p-7 shadow-sm sm:p-10">
             <div className="mb-5 flex flex-wrap items-baseline justify-between gap-2">
               <h3 className="font-display text-2xl font-bold tracking-tight">{SAMPLE.title}</h3>
@@ -559,7 +1217,77 @@ function Site() {
                 : "This exact result is what Step 2 gives you on any page you visit."}
             </p>
           </article>
+          ) : (
+          <div
+            key={`pr-${proofKey}`}
+            className="relative overflow-hidden rounded-2xl border-2 border-[#0f8a6d] bg-white p-7 shadow-[10px_10px_0_#0f8a6d] sm:p-10"
+          >
+            <div className="mb-6 flex flex-wrap items-baseline justify-between gap-3">
+              <div>
+                <p className="mb-1 flex items-center gap-2 text-[10px] font-extrabold uppercase tracking-[0.18em] text-[#0f8a6d]">
+                  <Sparkles size={11} fill="currentColor" /> Tailored summary
+                </p>
+                <h3 className="font-display text-2xl font-bold tracking-tight break-words">
+                  {proofResult.title}
+                </h3>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs font-semibold text-[#0c1a16]/45">
+                  {proofResult.words.toLocaleString()} words ·{" "}
+                  {Math.max(1, Math.round(proofResult.words / 220))} min read
+                </span>
+                <button
+                  onClick={() => {
+                    setProofMode("sample");
+                    setProofResult(null);
+                  }}
+                  className="rounded-full border border-[#0c1a16]/25 px-3 py-1 text-xs font-bold text-[#0c1a16]/60 transition-colors hover:border-[#0f8a6d] hover:text-[#0f8a6d]"
+                >
+                  ← back to sample
+                </button>
+              </div>
+            </div>
+
+            <ol className="space-y-3">
+              {proofResult.points.map((p, i) => (
+                <li key={i} className="point-in flex gap-3" style={{ animationDelay: `${0.1 + i * 0.15}s` }}>
+                  <span className="mt-0.5 flex h-6 w-6 flex-none items-center justify-center rounded-md bg-[#0c1a16] text-xs font-bold text-[#e8a33d]">
+                    {i + 1}
+                  </span>
+                  <span className="text-sm leading-relaxed text-[#0c1a16]/85">{p}</span>
+                </li>
+              ))}
+            </ol>
+
+            {proofResult.details.length > 0 && (
+              <div
+                className="point-in mt-6 rounded-xl border border-[#e8a33d]/50 bg-[#e8a33d]/10 p-5"
+                style={{ animationDelay: `${0.1 + proofResult.points.length * 0.15 + 0.15}s` }}
+              >
+                <p className="mb-2.5 text-[10px] font-extrabold uppercase tracking-[0.16em] text-[#a86f1a]">
+                  Full summary — everything else that matters
+                </p>
+                <p className="text-justify text-sm leading-relaxed text-[#0c1a16]/75">
+                  {proofResult.details.join(" ")}
+                </p>
+                {proofResult.folded > 0 && (
+                  <p className="mt-2 text-xs italic text-[#0c1a16]/50">
+                    +{proofResult.folded} more supporting sentences folded in to keep this readable.
+                  </p>
+                )}
+              </div>
+            )}
+
+            <p className="mt-6 flex items-center gap-2 text-sm font-semibold text-[#0f8a6d]">
+              <Bolt size={14} fill="currentColor" />
+              The same engine powers the button on every page — install it in Step 2.
+            </p>
+          </div>
+          )}
         </section>
+
+        {/* Workbench */}
+        <Workbench />
 
         {/* Content-type ticker */}
         <section className="reveal -mx-5 mb-14 overflow-hidden border-y-2 border-[#0c1a16] bg-[#0c1a16] py-3">
@@ -1148,6 +1876,26 @@ function Site() {
                       Directory <code className="rounded bg-[#f1f3ee]/10 px-1">dist</code>, and redeploy.
                     </p>
                   </div>
+                </div>
+
+                {/* Updating later */}
+                <div className="mt-3 rounded-xl border border-[#7fd4bd]/40 bg-[#7fd4bd]/8 p-4">
+                  <p className="mb-2 flex items-center gap-2 text-[10px] font-extrabold uppercase tracking-[0.16em] text-[#7fd4bd]">
+                    <RefreshCw size={12} /> Updating the site later
+                  </p>
+                  <p className="text-xs leading-relaxed text-[#f1f3ee]/70">
+                    Download the newest project, then on GitHub replace changed files in place —
+                    open each folder and use <strong className="text-[#f1f3ee]">Add file → Upload
+                    files</strong>: <code className="rounded bg-[#f1f3ee]/10 px-1">App.tsx</code> +{" "}
+                    <code className="rounded bg-[#f1f3ee]/10 px-1">index.css</code> go into{" "}
+                    <code className="rounded bg-[#f1f3ee]/10 px-1">src</code>;{" "}
+                    <code className="rounded bg-[#f1f3ee]/10 px-1">summarize.ts</code> +{" "}
+                    <code className="rounded bg-[#f1f3ee]/10 px-1">insights.ts</code> into{" "}
+                    <code className="rounded bg-[#f1f3ee]/10 px-1">src/lib</code>;{" "}
+                    <code className="rounded bg-[#f1f3ee]/10 px-1">sw.js</code> into{" "}
+                    <code className="rounded bg-[#f1f3ee]/10 px-1">public</code>. Each commit
+                    triggers a fresh deploy automatically.
+                  </p>
                 </div>
 
                 <p className="mt-5 rounded-xl border-l-4 border-[#7fd4bd] bg-[#7fd4bd]/10 p-3.5 text-xs leading-relaxed text-[#f1f3ee]/70">
