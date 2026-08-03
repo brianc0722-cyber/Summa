@@ -107,29 +107,41 @@ body {
   animation: panel-in 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.15) both;
 }
 
-/* Ambient blob drift */
+/* Scanned points drop in one by one */
+@keyframes point-in {
+  0% { opacity: 0; transform: translateX(-10px); }
+  60% { opacity: 1; }
+  100% { opacity: 1; transform: translateX(0); }
+}
+.point-in {
+  animation: point-in 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+/* Ambient background drift */
 @keyframes drift-a {
   0%, 100% { transform: translate(0, 0) scale(1); }
-  50% { transform: translate(30px, 22px) scale(1.08); }
+  50% { transform: translate(50px, 34px) scale(1.08); }
 }
 @keyframes drift-b {
   0%, 100% { transform: translate(0, 0) scale(1); }
-  50% { transform: translate(-26px, -18px) scale(1.06); }
+  50% { transform: translate(-56px, -26px) scale(1.1); }
 }
-.drift-a { animation: drift-a 14s ease-in-out infinite; }
-.drift-b { animation: drift-b 17s ease-in-out infinite; }
-
-/* Number badge tick-in */
-@keyframes tick-in {
-  from { transform: scale(0); }
-  70% { transform: scale(1.15); }
-  to { transform: scale(1); }
-}
-.tick-in { animation: tick-in 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.4) both; }
-
+.blob-a { animation: drift-a 19s ease-in-out infinite; }
+.blob-b { animation: drift-b 24s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) {
-  .drift-a, .drift-b, .marquee-track, .pulse-ring::after { animation: none; }
-  .reveal { transition: none; opacity: 1; transform: none; }
+  .blob-a, .blob-b, .marquee-track, .proof-scan, .point-in { animation: none; }
+  .point-in { opacity: 1; }
+}
+
+/* One-shot scanner sweep across the sample article */
+@keyframes proof-scan {
+  0% { top: 0; opacity: 0; }
+  10% { opacity: 1; }
+  85% { top: calc(100% - 3px); opacity: 1; }
+  100% { top: calc(100% - 3px); opacity: 0; }
+}
+.proof-scan {
+  animation: proof-scan 1.4s ease-in-out both;
 }
 
 ::selection {
