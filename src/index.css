@@ -1,0 +1,138 @@
+@import "tailwindcss";
+
+:root {
+  --ink: #0c1a16;
+  --paper: #f1f3ee;
+  --teal: #0f8a6d;
+  --teal-deep: #0a5c49;
+  --amber: #e8a33d;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: "Instrument Sans", system-ui, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-display {
+  font-family: "Bricolage Grotesque", "Instrument Sans", sans-serif;
+}
+
+/* Ambient dotted grid */
+.dot-grid {
+  background-image: radial-gradient(rgba(12, 26, 22, 0.12) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+.dot-grid-light {
+  background-image: radial-gradient(rgba(241, 243, 238, 0.1) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+/* Scroll reveal */
+.reveal {
+  opacity: 0;
+  transform: translateY(26px);
+  transition: opacity 0.7s ease, transform 0.7s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.reveal.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Marquee */
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+.marquee-track {
+  animation: marquee 32s linear infinite;
+}
+
+/* Demo browser scan */
+@keyframes scan-sweep {
+  0% { top: 8%; opacity: 0; }
+  8% { opacity: 1; }
+  60% { top: 78%; opacity: 1; }
+  70% { opacity: 0; }
+  100% { top: 78%; opacity: 0; }
+}
+.scan-line {
+  animation: scan-sweep 5.5s ease-in-out infinite;
+}
+
+@keyframes line-shimmer {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+.demo-line {
+  animation: line-shimmer 2.6s ease-in-out infinite;
+}
+
+@keyframes summary-pop {
+  0%, 62% { opacity: 0; transform: translateY(10px) scale(0.97); }
+  72% { opacity: 1; transform: translateY(0) scale(1); }
+  92% { opacity: 1; }
+  100% { opacity: 0; }
+}
+.summary-pop {
+  animation: summary-pop 5.5s ease-in-out infinite;
+}
+
+/* Floating button pulse ring */
+@keyframes pulse-ring {
+  0% { transform: scale(1); opacity: 0.5; }
+  80%, 100% { transform: scale(1.7); opacity: 0; }
+}
+.pulse-ring::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: var(--teal);
+  animation: pulse-ring 2.4s cubic-bezier(0.2, 0.6, 0.4, 1) infinite;
+  z-index: -1;
+}
+
+/* Panel entrance */
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(14px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.panel-in {
+  animation: panel-in 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.15) both;
+}
+
+/* Ambient blob drift */
+@keyframes drift-a {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(30px, 22px) scale(1.08); }
+}
+@keyframes drift-b {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-26px, -18px) scale(1.06); }
+}
+.drift-a { animation: drift-a 14s ease-in-out infinite; }
+.drift-b { animation: drift-b 17s ease-in-out infinite; }
+
+/* Number badge tick-in */
+@keyframes tick-in {
+  from { transform: scale(0); }
+  70% { transform: scale(1.15); }
+  to { transform: scale(1); }
+}
+.tick-in { animation: tick-in 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.4) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .drift-a, .drift-b, .marquee-track, .pulse-ring::after { animation: none; }
+  .reveal { transition: none; opacity: 1; transform: none; }
+}
+
+::selection {
+  background: var(--amber);
+  color: var(--ink);
+}
