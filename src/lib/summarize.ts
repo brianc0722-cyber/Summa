@@ -22,7 +22,7 @@ export interface ScanResult {
   folded: number;
 }
 
-function tokenize(text: string): string[] {
+export function tokenize(text: string): string[] {
   return text
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, " ")
@@ -31,7 +31,7 @@ function tokenize(text: string): string[] {
 }
 
 /** Lookbehind-free sentence splitter — runs on every browser. */
-function splitSentences(text: string): string[] {
+export function splitSentences(text: string): string[] {
   const matches =
     text.replace(/\s+/g, " ").trim().match(/[^.!?]*[.!?]+(?:\s|$)|[^.!?]+$/g) ?? [];
   return matches.map((s) => s.trim()).filter((s) => s.split(" ").length >= 6);

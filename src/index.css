@@ -133,6 +133,12 @@ body {
   .point-in { opacity: 1; }
 }
 
+/* Workbench indeterminate progress */
+@keyframes wb-slide {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(320%); }
+}
+
 /* One-shot scanner sweep across the sample article */
 @keyframes proof-scan {
   0% { top: 0; opacity: 0; }

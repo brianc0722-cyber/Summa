@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Build output (Vercel builds from source)
+dist/
+
+# Editor / OS noise
+.DS_Store
+*.local
+.vscode/
+.idea/
+
+# Logs
+npm-debug.log*
+*.log

@@ -314,6 +314,8 @@ function Workbench() {
   const [text, setText] = useState("");
   const [url, setUrl] = useState("");
   const [urlState, setUrlState] = useState<"idle" | "loading" | "error">("idle");
+  const [proxyUrl, setProxyUrl] = useState<string | null>(null);
+  const [errMsg, setErrMsg] = useState<string | null>(null);
   const [source, setSource] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [runKey, setRunKey] = useState(0);
@@ -349,12 +351,60 @@ function Workbench() {
     runAnalysis(text, "Pasted material");
   };
 
-  const runFromUrl = async () => {
-    let u = url.trim();
+  const runFromUrl = async (targetUrl?: string) => {
+    let u = (targetUrl ?? url).trim();
     if (!u) return;
     if (!/^https?:\/\//i.test(u)) u = "https://" + u;
+    if (targetUrl) setUrl(u);
     setUrlState("loading");
+    setProxyUrl(null);
+    setErrMsg(null);
     try {
+      // Wikipedia gets first-class treatment: pull the full plain-text
+      // article through the open MediaWiki API (CORS-enabled) for a
+      // clean, complete read instead of scraping page chrome.
+      const parsed = new URL(u);
+      const parts = parsed.hostname.split(".");
+      const isWiki =
+        parts.length >= 3 &&
+        parts[parts.length - 2] === "wikipedia" &&
+        parts[parts.length - 1] === "org" &&
+        parsed.pathname.startsWith("/wiki/");
+      if (isWiki) {
+        const first = parts[0];
+        const lang = parts.length >= 4 && first !== "m" && first !== "www" ? first : "en";
+        const title = decodeURIComponent(parsed.pathname.slice("/wiki/".length));
+        const api =
+          `https://${lang}.wikipedia.org/w/api.php?action=query&prop=extracts` +
+          `&explaintext=1&redirects=1&format=json&origin=*` +
+          `&titles=${encodeURIComponent(title)}`;
+        const wr = await fetch(api);
+        if (!wr.ok) throw new Error("http");
+        const json = (await wr.json()) as {
+          query?: { pages?: Record<string, { extract?: string; title?: string }> };
+        };
+        const page = Object.values(json.query?.pages ?? {})[0];
+        let t = (page?.extract || "").replace(/\s+/g, " ").trim();
+        let outTitle = (page?.title || title).replace(/_/g, " ");
+        if (t.length < 200) {
+          // Fallback: the REST summary endpoint (also CORS-open).
+          const rr = await fetch(
+            `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`
+          );
+          if (rr.ok) {
+            const rj = (await rr.json()) as { extract?: string; title?: string };
+            t = (rj.extract || "").replace(/\s+/g, " ").trim();
+            outTitle = rj.title || outTitle;
+          }
+        }
+        if (t.length < 200)
+          throw new Error("Wikipedia returned almost no text — check that the article title exists.");
+        setText(t);
+        setSource(u);
+        setUrlState("idle");
+        runAnalysis(t, outTitle);
+        return;
+      }
       const res = await fetch(u);
       if (!res.ok) throw new Error("http");
       const html = await res.text();
@@ -365,9 +415,40 @@ function Workbench() {
       setText(t);
       setSource(u);
       setUrlState("idle");
-      runAnalysis(t, new URL(u).hostname.replace(/^www\./, ""));
-    } catch {
+      runAnalysis(t, parsed.hostname.replace(/^www\./, ""));
+    } catch (e) {
+      setErrMsg(e instanceof Error && e.message ? e.message : "fetch failed");
+      setProxyUrl(u);
       setUrlState("error");
+    }
+  };
+
+  // Opt-in fallback for sites that block browser-only fetching: a public
+  // reader proxy. Explicitly consented because the URL leaves the machine.
+  const runViaProxy = async () => {
+    if (!proxyUrl) return;
+    setUrlState("loading");
+    try {
+      const res = await fetch(`https://r.jina.ai/${proxyUrl}`);
+      if (!res.ok) throw new Error("http");
+      let t = await res.text();
+      t = t
+        .replace(/^Title:.*$/im, "")
+        .replace(/^URL Source:.*$/im, "")
+        .replace(/^Markdown Content:/im, "")
+        .replace(/[#>*`[\]]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (t.length < 200) throw new Error("thin");
+      setText(t);
+      setSource(proxyUrl + " (via reader)");
+      setUrlState("idle");
+      setProxyUrl(null);
+      runAnalysis(t, new URL(proxyUrl).hostname.replace(/^www\./, ""));
+    } catch (e) {
+      setErrMsg(e instanceof Error && e.message ? e.message : "reader failed");
+      setUrlState("error");
+      setProxyUrl(null);
     }
   };
 
@@ -515,23 +596,63 @@ function Workbench() {
                     className="flex-1 rounded-xl border border-[#0c1a16]/20 bg-[#f7f9f5] px-4 py-3 text-sm outline-none transition focus:border-[#0f8a6d] focus:ring-4 focus:ring-[#0f8a6d]/15"
                   />
                   <button
-                    onClick={runFromUrl}
+                    onClick={() => runFromUrl()}
                     disabled={!url.trim() || urlState === "loading"}
                     className="rounded-xl bg-[#0f8a6d] px-5 font-bold text-white transition-all hover:bg-[#0a5c49] disabled:opacity-40"
                   >
                     {urlState === "loading" ? "…" : "Fetch"}
                   </button>
                 </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <span className="text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#0c1a16]/45">
+                    Try:
+                  </span>
+                  {[
+                    ["Attention (ML)", "https://en.wikipedia.org/wiki/Attention_(machine_learning)"],
+                    ["Photosynthesis", "https://en.wikipedia.org/wiki/Photosynthesis"],
+                    ["Roman roads", "https://en.wikipedia.org/wiki/Roman_roads"],
+                  ].map(([label, link]) => (
+                    <button
+                      key={link}
+                      onClick={() => runFromUrl(link)}
+                      className="inline-flex items-center gap-1 rounded-full border border-[#0c1a16]/20 bg-white px-2.5 py-1 text-[11px] font-semibold text-[#0c1a16]/65 transition-all hover:-translate-y-0.5 hover:border-[#0f8a6d] hover:text-[#0f8a6d]"
+                    >
+                      <Globe size={10} /> {label}
+                    </button>
+                  ))}
+                </div>
                 {urlState === "error" && (
-                  <p className="mt-3 rounded-lg border-l-4 border-[#e8695a] bg-[#e8695a]/10 p-3 text-xs leading-relaxed text-[#b3402f]">
-                    That site blocks browser-only fetching (or needs JavaScript to render). Paste
-                    its text instead, or use the extension's <strong>From URL</strong> — extensions
-                    bypass this limit.
-                  </p>
+                  <div className="mt-3 rounded-lg border-l-4 border-[#e8695a] bg-[#e8695a]/10 p-3">
+                    <p className="text-xs leading-relaxed text-[#b3402f]">
+                      That site blocks browser-only fetching (or needs JavaScript to render). You
+                      can paste its text instead, use the extension's <strong>From URL</strong> —
+                      extensions bypass this limit — or try the public reader below.
+                    </p>
+                    {errMsg && (
+                      <p className="mt-1.5 font-mono text-[10px] text-[#b3402f]/75">
+                        detail: {errMsg}
+                      </p>
+                    )}
+                    {proxyUrl && (
+                      <button
+                        onClick={runViaProxy}
+                        className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-[#b3402f] px-3.5 py-1.5 text-[11px] font-bold text-white transition-all hover:-translate-y-0.5 hover:bg-[#8f2f22]"
+                      >
+                        <Globe size={11} /> Retry via public reader
+                      </button>
+                    )}
+                    {proxyUrl && (
+                      <p className="mt-1.5 text-[10px] text-[#b3402f]/80">
+                        Sends the URL to r.jina.ai to fetch a readable copy — use only for public
+                        pages you're comfortable sharing.
+                      </p>
+                    )}
+                  </div>
                 )}
                 <p className="mt-3 text-xs leading-relaxed text-[#0c1a16]/55">
-                  Works best with CORS-open sources (Wikipedia, public APIs, your own sites).
-                  Nothing is sent to a server beyond the direct request to the page itself.
+                  Wikipedia links get the full article text via its open API — any language edition
+                  works, including mobile and bare domains. Other open sources fetch directly with
+                  nothing leaving your machine; locked-down sites offer the opt-in reader above.
                 </p>
               </>
             )}
@@ -2147,6 +2268,61 @@ vercel --prod   # ships it live`}
                   loaded, the teal button drops onto <strong>every page automatically</strong> —
                   no icon-clicking needed. Everything runs on your device.
                 </p>
+              </div>
+
+              {/* Developer mode */}
+              <div className="rounded-xl border-2 border-[#0c1a16] bg-[#0c1a16] p-5 text-[#f1f3ee] sm:col-span-2">
+                <p className="mb-3 flex items-center gap-2 text-[10px] font-extrabold uppercase tracking-[0.16em] text-[#e8a33d]">
+                  <GitBranch size={13} /> Developer mode — take the code and build on it
+                </p>
+                <div className="grid gap-6 lg:grid-cols-[1fr_1.1fr]">
+                  <div>
+                    <p className="mb-2 text-xs font-bold text-[#f1f3ee]/80">Local setup</p>
+                    <pre className="overflow-x-auto rounded-lg bg-[#f1f3ee]/8 p-3 font-mono text-xs leading-relaxed text-[#7fd4bd]">
+{`npm install        # once, needs Node 18+
+npm run dev        # live at http://localhost:5173
+npm run build      # production bundle → dist/`}
+                    </pre>
+                    <p className="mt-2 text-xs leading-relaxed text-[#f1f3ee]/60">
+                      Grab the source either way: download the project from Arena, or{" "}
+                      <code className="rounded bg-[#f1f3ee]/10 px-1">git clone</code> your Summa
+                      repo — copy the URL from the green{" "}
+                      <strong className="text-[#7fd4bd]">&lt;&gt; Code</strong> button on GitHub and
+                      paste it after <code className="rounded bg-[#f1f3ee]/10 px-1">git clone</code>{" "}
+                      in a terminal. Edit in VS Code — changes hot-reload instantly on localhost.
+                    </p>
+                    <p className="mt-2 border-l-2 border-[#7fd4bd] pl-2 text-[11px] leading-relaxed text-[#7fd4bd]/90">
+                      localhost missing a new feature? Your clone is older than Arena. Re-download
+                      from Arena and overwrite <code className="rounded bg-[#f1f3ee]/10 px-1">src/App.tsx</code>{" "}
+                      in your Summa folder — the dev server hot-reloads it instantly. Once you start
+                      pushing your own edits, <code className="rounded bg-[#f1f3ee]/10 px-1">git pull</code>{" "}
+                      keeps any machine in sync.
+                    </p>
+                    <p className="mt-2 border-l-2 border-[#e8a33d] pl-2 text-[11px] leading-relaxed text-[#e8a33d]/90">
+                      Live site out of date? Sync everything at once: download the newest Arena
+                      project, copy <em>all</em> its files into your local Summa folder (replace
+                      when asked), then in Git Bash run{" "}
+                      <code className="rounded bg-[#f1f3ee]/10 px-1">git add . && git commit -m "sync" && git push</code>.
+                      Vercel rebuilds automatically and the live site matches Arena.
+                    </p>
+                  </div>
+                  <div>
+                    <p className="mb-2 text-xs font-bold text-[#f1f3ee]/80">File map</p>
+                    <ul className="space-y-1.5 font-mono text-[11px] leading-relaxed text-[#f1f3ee]/70">
+                      <li><span className="text-[#e8a33d]">src/App.tsx</span> — the whole page: proof, Workbench, install paths, deploy guide</li>
+                      <li><span className="text-[#e8a33d]">src/lib/summarize.ts</span> — scan engine: 5 points + full non-redundant summary</li>
+                      <li><span className="text-[#e8a33d]">src/lib/bookmarkletSource.ts</span> — the button widget (bookmark + ZIP)</li>
+                      <li><span className="text-[#e8a33d]">extension/widget.js</span> — same widget, Chrome-extension copy</li>
+                      <li><span className="text-[#e8a33d]">extension/manifest.json</span> — permissions + auto-inject on every page</li>
+                      <li><span className="text-[#e8a33d]">public/sw.js</span> — offline cache + fresh-deploy logic</li>
+                    </ul>
+                    <p className="mt-2 border-l-2 border-[#e8a33d] pl-2 text-[11px] leading-relaxed text-[#e8a33d]/90">
+                      One rule: <code className="rounded bg-[#f1f3ee]/10 px-1">extension/widget.js</code> and{" "}
+                      <code className="rounded bg-[#f1f3ee]/10 px-1">bookmarkletSource.ts</code> are two
+                      copies of the same scanner — change them together.
+                    </p>
+                  </div>
+                </div>
               </div>
             </div>
           </details>
