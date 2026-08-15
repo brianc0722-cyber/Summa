@@ -38,6 +38,13 @@ import bookmarkletSrc from "./lib/bookmarkletSource.ts?raw";
 import { WIDGET_SOURCE, buildBookmarkletHref } from "./lib/bookmarkletSource";
 import { buildExtensionZip } from "./lib/extensionBundle";
 import { readTime, scanDocument, wordCount } from "./lib/summarize";
+import {
+  FEED_SOURCES,
+  fetchFeed,
+  fetchTrendingWiki,
+  fetchWikiFullText,
+  type LiveArticle,
+} from "./lib/feeds";
 import JSZip from "jszip";
 
 /* ---------------- Reveal-on-scroll (failsafe) ---------------- */
@@ -406,6 +413,219 @@ const WB_SAMPLES: Record<string, { label: string; icon: typeof Newspaper; title:
     body: `Thanks for the update, team. I want to flag a few things before we commit to the March 14 launch. The payments integration is still failing intermittently in staging — roughly 1 in 40 transactions — and the vendor says a fix is at least two weeks out. Marketing has already scheduled the announcement email for March 12, so slipping means re-coordinating with three external partners. That said, the beta cohort of 240 users gave the new onboarding flow a 4.6 out of 5 satisfaction score, and support tickets from beta dropped 30 percent week over week, which tells me the core product is genuinely ready. My recommendation: keep the March 14 date for the product launch, but gate payments behind a waitlist for the first two weeks and offer those users three months free as compensation. Please review the attached risk table and reply with your vote by Thursday at 5pm so we can brief leadership on Friday. Thanks, Dana`,
   },
 };
+
+/* ---------------- Live trending feed ---------------- */
+
+function LiveFeed({ onScan }: { onScan: (text: string, label: string) => void }) {
+  const [sourceId, setSourceId] = useState<string>("trending");
+  const [items, setItems] = useState<LiveArticle[]>([]);
+  const [idx, setIdx] = useState(0);
+  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
+  const [err, setErr] = useState<string>("");
+  const [auto, setAuto] = useState(true);
+  const [loadingFull, setLoadingFull] = useState(false);
+
+  const load = async (id: string) => {
+    setState("loading");
+    setErr("");
+    setIdx(0);
+    try {
+      const list =
+        id === "trending"
+          ? await fetchTrendingWiki()
+          : await fetchFeed(FEED_SOURCES.find((s) => s.id === id)!);
+      if (!list.length) throw new Error("No articles returned");
+      setItems(list);
+      setState("ready");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Couldn't reach that source");
+      setState("error");
+    }
+  };
+
+  useEffect(() => {
+    load(sourceId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceId]);
+
+  // Gentle rotation so the panel feels alive without hijacking attention.
+  useEffect(() => {
+    if (!auto || state !== "ready" || items.length < 2) return;
+    const t = window.setInterval(() => setIdx((i) => (i + 1) % items.length), 7000);
+    return () => window.clearInterval(t);
+  }, [auto, state, items.length]);
+
+  const current = items[idx];
+
+  const scanCurrent = async () => {
+    if (!current) return;
+    // Wikipedia links can give us the whole article, not just the teaser.
+    if (/wikipedia\.org\/wiki\//.test(current.link)) {
+      setLoadingFull(true);
+      try {
+        const full = await fetchWikiFullText(current.link);
+        setLoadingFull(false);
+        if (full.length > 400) return onScan(full, current.title);
+      } catch {
+        setLoadingFull(false);
+      }
+    }
+    onScan(`${current.title}. ${current.summary}`, current.title);
+  };
+
+  return (
+    <div className="overflow-hidden rounded-2xl border-2 border-[#0c1a16] bg-white shadow-[10px_10px_0_#e8a33d]">
+      {/* Header */}
+      <div className="flex flex-wrap items-center gap-2 border-b-2 border-[#0c1a16] bg-gradient-to-r from-[#dff0e6] via-[#cfe8db] to-[#e4f2ea] px-5 py-3 sm:px-7">
+        <span className="relative flex h-2.5 w-2.5">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#0f8a6d] opacity-60" />
+          <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-[#0f8a6d]" />
+        </span>
+        <span className="font-display text-sm font-extrabold text-[#0a4034]">
+          Live — trending right now
+        </span>
+        <button
+          onClick={() => setAuto((a) => !a)}
+          className="ml-auto rounded-full border border-[#0f8a6d]/30 bg-white/70 px-2.5 py-1 text-[10px] font-bold text-[#0a4034]/75 transition-colors hover:bg-white"
+          title={auto ? "Pause rotation" : "Resume rotation"}
+        >
+          {auto ? "❚❚ pause" : "▶ play"}
+        </button>
+        <button
+          onClick={() => load(sourceId)}
+          className="rounded-full border border-[#0f8a6d]/30 bg-white/70 px-2.5 py-1 text-[10px] font-bold text-[#0a4034]/75 transition-colors hover:bg-white"
+          title="Refresh this feed"
+        >
+          <RefreshCw size={10} className="inline" /> refresh
+        </button>
+      </div>
+
+      {/* Source tabs */}
+      <div className="flex flex-wrap gap-1.5 border-b border-[#0c1a16]/10 bg-[#f7f9f5] px-4 py-2.5">
+        {[{ id: "trending", label: "Most read" }, ...FEED_SOURCES].map((s) => (
+          <button
+            key={s.id}
+            onClick={() => setSourceId(s.id)}
+            className={`rounded-full px-3 py-1 text-[11px] font-bold transition-all ${
+              sourceId === s.id
+                ? "bg-[#0c1a16] text-[#f1f3ee] shadow-sm"
+                : "bg-white text-[#0c1a16]/60 hover:text-[#0f8a6d]"
+            }`}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Body */}
+      <div className="min-h-[190px] p-5 sm:p-6">
+        {state === "loading" && (
+          <div className="space-y-2.5 pt-2">
+            <div className="h-4 w-2/3 animate-pulse rounded bg-[#0c1a16]/10" />
+            <div className="h-3 w-full animate-pulse rounded bg-[#0c1a16]/8" />
+            <div className="h-3 w-5/6 animate-pulse rounded bg-[#0c1a16]/8" />
+            <p className="pt-2 text-xs font-semibold text-[#0c1a16]/45">Fetching live articles…</p>
+          </div>
+        )}
+
+        {state === "error" && (
+          <div className="rounded-xl border-l-4 border-[#e8695a] bg-[#e8695a]/10 p-4">
+            <p className="text-sm font-semibold text-[#b3402f]">Couldn't load this feed</p>
+            <p className="mt-1 text-xs leading-relaxed text-[#b3402f]/85">
+              {err}. Public feeds occasionally rate-limit or go offline — try another source or
+              hit refresh. You can always paste an article into the Workbench below instead.
+            </p>
+            <button
+              onClick={() => load(sourceId)}
+              className="mt-3 rounded-full bg-[#b3402f] px-4 py-1.5 text-xs font-bold text-white transition-colors hover:bg-[#8f2f22]"
+            >
+              Try again
+            </button>
+          </div>
+        )}
+
+        {state === "ready" && current && (
+          <div key={idx} className="panel-in">
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <span className="rounded-full bg-[#0f8a6d] px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-[0.12em] text-white">
+                {current.source}
+              </span>
+              {current.published && (
+                <span className="text-[11px] font-semibold text-[#0c1a16]/40">
+                  {new Date(current.published).toLocaleDateString(undefined, {
+                    month: "short",
+                    day: "numeric",
+                  })}
+                </span>
+              )}
+              <span className="ml-auto text-[11px] font-bold tabular-nums text-[#0c1a16]/35">
+                {idx + 1} / {items.length}
+              </span>
+            </div>
+
+            <h3 className="font-display mb-2 text-xl font-extrabold leading-snug tracking-tight text-[#0c1a16]">
+              {current.title}
+            </h3>
+            <p className="mb-4 line-clamp-3 text-sm leading-relaxed text-[#0c1a16]/70">
+              {current.summary}
+            </p>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={scanCurrent}
+                disabled={loadingFull}
+                className="inline-flex items-center gap-2 rounded-full bg-[#0f8a6d] px-5 py-2.5 text-sm font-bold text-white shadow-[0_8px_20px_rgba(15,138,109,0.3)] transition-all hover:-translate-y-0.5 hover:bg-[#0a5c49] disabled:opacity-60"
+              >
+                <Bolt size={14} fill="currentColor" />
+                {loadingFull ? "Loading article…" : "Summarize this"}
+              </button>
+              {current.link && (
+                <a
+                  href={current.link}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 rounded-full border border-[#0c1a16]/20 px-3.5 py-2 text-xs font-bold text-[#0c1a16]/70 transition-all hover:-translate-y-0.5 hover:border-[#0f8a6d] hover:text-[#0f8a6d]"
+                >
+                  Read original <ExternalLink size={11} />
+                </a>
+              )}
+              <span className="ml-auto flex gap-1">
+                <button
+                  onClick={() => setIdx((i) => (i - 1 + items.length) % items.length)}
+                  className="rounded-full border border-[#0c1a16]/20 px-2.5 py-1.5 text-xs font-bold text-[#0c1a16]/60 transition-colors hover:border-[#0f8a6d] hover:text-[#0f8a6d]"
+                  aria-label="Previous article"
+                >
+                  ←
+                </button>
+                <button
+                  onClick={() => setIdx((i) => (i + 1) % items.length)}
+                  className="rounded-full border border-[#0c1a16]/20 px-2.5 py-1.5 text-xs font-bold text-[#0c1a16]/60 transition-colors hover:border-[#0f8a6d] hover:text-[#0f8a6d]"
+                  aria-label="Next article"
+                >
+                  →
+                </button>
+              </span>
+            </div>
+
+            {/* Progress dots */}
+            <div className="mt-4 flex flex-wrap gap-1">
+              {items.map((_, i) => (
+                <button
+                  key={i}
+                  onClick={() => setIdx(i)}
+                  className={`h-1.5 flex-1 rounded-full transition-all ${
+                    i === idx ? "bg-[#0f8a6d]" : "bg-[#0c1a16]/12 hover:bg-[#0c1a16]/25"
+                  }`}
+                  aria-label={`Article ${i + 1}`}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 /* ---------------- Point-count selector ---------------- */
 
@@ -969,9 +1189,23 @@ function Workbench() {
       <Collapsible
         id="workbench"
         tone="dark"
-        title="The Workbench — analyze your own material"
-        hint="paste · URL · upload"
+        title="The Workbench — live articles or your own material"
+        hint="trending · paste · URL · upload"
       >
+      <div className="mb-6">
+        <LiveFeed
+          onScan={(t, label) => {
+            setMode("paste");
+            setText(t);
+            setSource(label);
+            runAnalysis(t, label);
+            window.setTimeout(
+              () => document.getElementById("workbench")?.scrollIntoView({ behavior: "smooth", block: "start" }),
+              80
+            );
+          }}
+        />
+      </div>
       <div className="overflow-hidden rounded-2xl border-2 border-[#0c1a16] bg-white shadow-[10px_10px_0_#0c1a16]">
         {/* Console header */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b-2 border-[#0c1a16] bg-[#0c1a16] px-6 py-5 sm:px-8">
