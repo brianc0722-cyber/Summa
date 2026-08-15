@@ -18,8 +18,19 @@
       if (prev) {
         prev.style.display = prev.style.display === "none" ? "flex" : "none";
         if (prev.style.display === "flex" && host.__psumRender) host.__psumRender();
+        return;
       }
-      return;
+      // A host element exists but its internals aren't reachable — this
+      // happens when the extension injected into an isolated world and the
+      // bookmarklet runs in the page world. Build a separate instance
+      // instead of failing silently.
+      ROOT_ID = "psum-root-alt";
+      host = document.getElementById(ROOT_ID);
+      if (host && host.__psumPanel) {
+        host.__psumPanel.style.display =
+          host.__psumPanel.style.display === "none" ? "flex" : "none";
+        return;
+      }
     }
     if (!document.body) {
       alert("Summa: page not ready yet — try again in a second.");
@@ -27,7 +38,9 @@
     }
 
     var STOP = "a an and are as at be but by for from has have had he her his i if in into is it its of on or that the their there these they this to was we were what when which while who will with you your our us not no can could would should may might about over under after before between during".split(" ");
-    var stopSet = {};
+    // Object.create(null): a plain {} inherits keys like "constructor",
+    // which would silently corrupt stopword and frequency lookups.
+    var stopSet = Object.create(null);
     for (var s = 0; s < STOP.length; s++) stopSet[STOP[s]] = true;
 
     function tokenize(text) {
@@ -36,19 +49,45 @@
       });
     }
 
+    // Boilerplate that scores well on frequency but says nothing.
+    var BOILERPLATE = /^(share this|read more|click here|sign up|subscribe|log ?in|sign ?in|advertisement|sponsored|cookie|we use cookies|accept all|privacy policy|terms of|all rights reserved|copyright|follow us|related articles?|you might also like|trending now|most popular|photo|image|getty|reuters|associated press|published|updated|posted on|comments?$|tags?:|filed under|skip to)/i;
+    var ABBREV = /\b(?:[A-Z]|Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|Mt|vs|etc|e\.g|i\.e|approx|Inc|Ltd|Corp|Co|Dept|Est|Fig|No|Vol|pp|al)\.$/i;
+
+    function usable(s) {
+      if (BOILERPLATE.test(s)) return false;
+      var letters = (s.match(/[a-z]/gi) || []).length;
+      if (letters / Math.max(s.length, 1) < 0.55) return false;
+      var words = s.split(/\s+/);
+      var capped = 0;
+      for (var c = 0; c < words.length; c++) if (/^[A-Z]/.test(words[c])) capped++;
+      if (words.length >= 5 && capped / words.length > 0.8) return false;
+      return true;
+    }
+
     function sentences(text, minWords) {
       var t = text.replace(/\s+/g, " ").trim();
       var parts = t.match(/[^.!?]*[.!?]+(?:\s|$)|[^.!?]+$/g) || [];
+      // Re-join fragments split on abbreviations or decimals so points
+      // don't arrive truncated mid-thought.
+      var merged = [];
+      for (var m = 0; m < parts.length; m++) {
+        var prev = merged[merged.length - 1];
+        if (prev && (ABBREV.test(prev.trim()) || /\d\.$/.test(prev.trim()))) {
+          merged[merged.length - 1] = prev + parts[m];
+        } else {
+          merged.push(parts[m]);
+        }
+      }
       var out = [];
-      for (var i = 0; i < parts.length; i++) {
-        var one = parts[i].trim();
-        if (one.split(" ").length >= minWords) out.push(one);
+      for (var i = 0; i < merged.length; i++) {
+        var one = merged[i].trim();
+        if (one.split(" ").length >= minWords && usable(one)) out.push(one);
       }
       return out;
     }
 
     function toSet(words) {
-      var s = {};
+      var s = Object.create(null);
       for (var x = 0; x < words.length; x++) s[words[x]] = 1;
       return s;
     }
@@ -90,19 +129,35 @@
       return "article";
     }
 
+    // Report depth scales with the material: a short post gets a tight
+    // summary, a long report gets a proportionally fuller one.
+    function depthFor(words, pr) {
+      if (words < 250) return { points: 3, support: Math.min(pr.maxSupport, 5), tier: "Brief" };
+      if (words < 1200) return { points: 5, support: pr.maxSupport, tier: "Standard" };
+      if (words < 4000) return { points: 7, support: Math.round(pr.maxSupport * 1.7), tier: "Extended" };
+      if (words < 12000) return { points: 10, support: Math.round(pr.maxSupport * 2.6), tier: "In-depth" };
+      return { points: 14, support: Math.round(pr.maxSupport * 3.5), tier: "Full report" };
+    }
+
     // Two-layer scan: the n main points, then every other informative,
     // non-redundant sentence as the full summary.
     function scan(text, n, title, pr) {
       var list = sentences(text, pr.minWords);
-      if (!list.length) return { points: ["No readable text found on this page."], details: [], folded: 0 };
-      if (list.length <= n) return { points: list, details: [], folded: 0 };
+      var totalWords = text.trim() ? text.trim().split(/\s+/).length : 0;
+      var depth = depthFor(totalWords, pr);
+      if (!n) n = depth.points;
+      var maxSupport = depth.support;
+      if (!list.length) return { points: ["No readable text found on this page."], details: [], folded: 0, tier: depth.tier };
+      if (list.length <= n) return { points: list, details: [], folded: 0, tier: depth.tier };
+      // Redundancy filtering is O(n^2) — cap so huge pages can't freeze the tab.
+      if (list.length > 4000) list = list.slice(0, 4000);
 
-      var freq = {};
+      var freq = Object.create(null);
       tokenize(text).forEach(function (w) { freq[w] = (freq[w] || 0) + 1; });
       var titleWords = toSet(tokenize(title || ""));
       var total = list.length;
 
-      var maxScore = 1;
+      var maxScore = 0;
       var scored = list.map(function (sent, i) {
         var words = tokenize(sent);
         var uniq = [];
@@ -127,6 +182,8 @@
         return { sent: sent, i: i, score: score, words: uniq, set: toSet(uniq) };
       });
 
+      if (maxScore <= 0) maxScore = 1;
+
       var byScore = scored.slice().sort(function (a, b) { return b.score - a.score; });
 
       var points = [];
@@ -140,7 +197,7 @@
       }
       if (!points.length) points = byScore.slice(0, n);
 
-      var pickedIdx = {};
+      var pickedIdx = Object.create(null);
       for (var m = 0; m < points.length; m++) pickedIdx[points[m].i] = 1;
 
       var rest = [];
@@ -160,14 +217,15 @@
       }
 
       var folded = 0;
-      if (rest.length > pr.maxSupport) { folded = rest.length - pr.maxSupport; rest = rest.slice(0, pr.maxSupport); }
+      if (rest.length > maxSupport) { folded = rest.length - maxSupport; rest = rest.slice(0, maxSupport); }
       rest.sort(function (a, b) { return a.i - b.i; });
       points.sort(function (a, b) { return a.i - b.i; });
 
       return {
         points: points.map(function (o) { return o.sent; }),
         details: rest.map(function (o) { return o.sent; }),
-        folded: folded
+        folded: folded,
+        tier: depth.tier
       };
     }
 
@@ -196,7 +254,7 @@
     // Scope "page": whole document minus chrome.
     function collectWhole(doc, minBlock) {
       var out = [];
-      var seen = {};
+      var seen = Object.create(null);
       var SKIP = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, SVG: 1, CANVAS: 1, VIDEO: 1, AUDIO: 1, IFRAME: 1, NAV: 1, FOOTER: 1, ASIDE: 1, FORM: 1, BUTTON: 1, SELECT: 1, INPUT: 1, TEXTAREA: 1, DIALOG: 1, TEMPLATE: 1, OBJECT: 1, EMBED: 1 };
       var HEAD = { H1: 1, H2: 1, H3: 1, H4: 1, H5: 1, H6: 1 };
       var SEM = { P: 1, LI: 1, BLOCKQUOTE: 1, TD: 1, TH: 1, DD: 1, DT: 1, FIGCAPTION: 1 };
@@ -279,6 +337,7 @@
       "#psum-meta{font-size:11px;color:#6b7a74;margin-bottom:10px;display:flex;gap:6px;flex-wrap:wrap}",
       "#psum-meta span{background:#eef1ea;border-radius:999px;padding:2px 9px}",
       "#psum-meta span.type{background:#0f8a6d;color:#fff;font-weight:700}",
+      "#psum-meta span.tier{background:#0c1a16;color:#e8a33d;font-weight:700}",
       "#psum-label{font-size:10px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;color:#0f8a6d;margin:0 0 10px}",
       "#psum-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px}",
       "#psum-list li{display:flex;gap:9px;align-items:flex-start}",
@@ -306,6 +365,11 @@
     host.__psumPanel = panel;
 
     function esc(str) { return String(str).replace(/</g, "&lt;"); }
+    // Attribute-safe: a value containing a quote would otherwise break out
+    // of the input's value="..." and mangle the panel.
+    function escAttr(str) {
+      return String(str).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+    }
 
     function hostLabel(href) {
       try { return new URL(href).hostname.replace(/^www\./, ""); } catch (e) { return href; }
@@ -365,7 +429,7 @@
         scanTitle = document.title;
       }
       var words = text.trim() ? text.trim().split(/\s+/).length : 0;
-      var result = scan(text, 5, scanTitle, pr);
+      var result = scan(text, 0, scanTitle, pr);
       var pts = result.points;
       var details = result.details;
 
@@ -397,8 +461,9 @@
         '<button data-s="article" class="' + (scope === "article" && !host.__psumUrl ? "on" : "") + '" title="Scan only the main article region">Article only</button>' +
         '<button id="psum-urltoggle" class="' + (host.__psumUrl ? "on" : "") + '" title="Summarize any URL">From URL</button></div>' +
         '<select id="psum-sel" title="Content type">' + opts + "</select></div>" +
-        '<div id="psum-urlrow' + (host.__psumUrlRowOpen ? " open" : "") + '"><input id="psum-url" type="url" placeholder="Paste any https:// link and press Fetch" value="' + esc(host.__psumUrlDraft || "") + '"><button id="psum-go">Fetch</button></div>' +
-        '<div id="psum-meta"><span class="type">' + TYPE_LABEL[resolved] + (chosen === "auto" ? " · auto" : "") + "</span><span>" + pts.length + " main points</span>" +
+        '<div id="psum-urlrow' + (host.__psumUrlRowOpen ? " open" : "") + '"><input id="psum-url" type="url" placeholder="Paste any https:// link and press Fetch" value="' + escAttr(host.__psumUrlDraft || "") + '"><button id="psum-go">Fetch</button></div>' +
+        '<div id="psum-meta"><span class="type">' + TYPE_LABEL[resolved] + (chosen === "auto" ? " · auto" : "") + "</span>" +
+        '<span class="tier">' + esc(result.tier || "") + "</span><span>" + pts.length + " main points</span>" +
         (details.length ? '<span>' + details.length + (result.folded ? "+" : "") + " supporting</span>" : "") +
         '<span>' + words + ' words</span><span>' + Math.max(1, Math.round(words / 220)) + ' min read</span></div>' +
         '<div id="psum-labelrow"><p id="psum-label">' +

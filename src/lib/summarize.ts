@@ -1,50 +1,45 @@
 /**
- * Summa website scanner — the readable TypeScript twin of the extension's
- * widget.js. Both do the same job; this module is used by the React site
- * (Workbench, demo, install page). The extension carries its own self-
- * contained copy so it never depends on a build step.
+ * Readable twin of the bookmarklet's scanner. The widget ships its own
+ * copy (see bookmarkletSource.ts); this module lets the site itself show
+ * what the scanner will extract, before you install anything.
  *
- * Improvements over the previous version:
- *   1. TF-IDF normalization — scores are relative to document size, so
- *      a word appearing 50x in 10,000 words scores the same as one
- *      appearing 5x in 1,000 words.
- *   2. Proportional output — points and summary length scale with the
- *      document word count, not a fixed constant.
- *   3. Adaptive redundancy threshold — tightens on short documents
- *      (where false positives are expensive) and loosens on long ones
- *      (where coverage matters more than precision).
- *   4. Content-type profiles — same five profiles as the extension:
- *      article, email, visual, docs, thread.
- *   5. Conclusion-signal detection expanded.
+ * Two-layer output:
+ *  - points:  the n main points (distinct, on-subject, fact-aware)
+ *  - details: a full summary of every other informative sentence that is
+ *             NOT redundant with the points — the rest of the article's
+ *             substance, in reading order.
  */
 
 const STOPWORDS = new Set(
-  "a an and are as at be been being but by could did do does for from had has have he her him his i if in into is it its just me might my no not of on or our s shall she should so some such than that the their them then there they this to up us very was we were what when which while who will with would you your".split(" ")
+  "a an and are as at be but by for from has have had he her his i if in into is it its of on or that the their there these they this to was we were what when which while who will with you your our us not no can could would should may might about over under after before between during".split(
+    " "
+  )
 );
 
-export type ContentType = "article" | "email" | "visual" | "docs" | "thread";
-
-interface Profile {
-  minWords: number;
-  lead: number;
-  end: number;
-  action: number;
-  maxSupport: number;
+export interface ScanResult {
+  points: string[];
+  details: string[];
+  folded: number;
+  /** True when the document exceeded MAX_SENTENCES and was analysed in part. */
+  capped: boolean;
+  /** Human label for how deep the report went, e.g. "In-depth". */
+  tier: string;
 }
 
-const PROFILES: Record<ContentType, Profile> = {
-  article: { minWords: 6, lead: 0.50, end: 0.00, action: 1.00, maxSupport: 14 },
-  email:   { minWords: 4, lead: 0.25, end: 0.35, action: 1.20, maxSupport: 8  },
-  visual:  { minWords: 4, lead: 0.20, end: 0.00, action: 1.00, maxSupport: 10 },
-  docs:    { minWords: 6, lead: 0.45, end: 0.00, action: 1.00, maxSupport: 16 },
-  thread:  { minWords: 4, lead: 0.15, end: 0.10, action: 1.00, maxSupport: 12 },
-};
+/**
+ * Report depth scales with the material: a short post gets a tight summary,
+ * a long report gets a proportionally fuller one.
+ */
+export function depthFor(words: number, baseSupport = 14) {
+  if (words < 250) return { points: 3, support: Math.min(baseSupport, 5), tier: "Brief" };
+  if (words < 1200) return { points: 5, support: baseSupport, tier: "Standard" };
+  if (words < 4000) return { points: 7, support: Math.round(baseSupport * 1.7), tier: "Extended" };
+  if (words < 12000) return { points: 10, support: Math.round(baseSupport * 2.6), tier: "In-depth" };
+  return { points: 14, support: Math.round(baseSupport * 3.5), tier: "Full report" };
+}
 
-const ACTION_RE =
-  /(please|kindly|attached|attachment|let me know|deadline|asap|regards|thank you|thanks|schedule|confirm|review|approve|reply|respond|by (monday|tuesday|wednesday|thursday|friday|tomorrow|eod|cob))/i;
-
-const CONCLUSION_RE =
-  /^(however|therefore|overall|in short|in conclusion|to summarize|as a result|the study|researchers|scientists|the report|in summary|the data|findings suggest|results show|evidence indicates|the analysis)/i;
+/** Redundancy filtering is O(n²); this ceiling keeps the tab responsive. */
+export const MAX_SENTENCES = 4000;
 
 export function tokenize(text: string): string[] {
   return text
@@ -54,150 +49,160 @@ export function tokenize(text: string): string[] {
     .filter((w) => w.length > 2 && !STOPWORDS.has(w));
 }
 
-export function splitSentences(text: string, minWords = 6): string[] {
-  const matches =
+/**
+ * Boilerplate that scores well on frequency but says nothing: nav labels,
+ * cookie notices, share prompts, bylines, subscription nags.
+ */
+const BOILERPLATE =
+  /^(share this|read more|click here|sign up|subscribe|log ?in|sign ?in|advertisement|sponsored|cookie|we use cookies|accept all|privacy policy|terms of|all rights reserved|copyright|follow us|related articles?|you might also like|trending now|most popular|photo|image|getty|reuters|associated press|published|updated|posted on|by [A-Z][a-z]+ [A-Z][a-z]+$|comments?$|tags?:|filed under|skip to)/i;
+
+/** Sentence fragments that indicate a bad extraction rather than a real point. */
+function isUsableSentence(s: string): boolean {
+  if (BOILERPLATE.test(s.trim())) return false;
+  // Needs at least one verb-ish word and a reasonable letter ratio — filters
+  // out menu dumps like "Home About Contact Careers Press".
+  const letters = (s.match(/[a-z]/gi) || []).length;
+  if (letters / Math.max(s.length, 1) < 0.55) return false;
+  // Reject ALL-CAPS banners and title-case link lists.
+  const words = s.split(/\s+/);
+  const capped = words.filter((w) => /^[A-Z]/.test(w)).length;
+  if (words.length >= 5 && capped / words.length > 0.8) return false;
+  return true;
+}
+
+/** Abbreviations that must not end a sentence. */
+const ABBREV =
+  /\b(?:[A-Z]|Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|Mt|vs|etc|e\.g|i\.e|approx|Inc|Ltd|Corp|Co|Dept|Est|Fig|No|Vol|pp|al)\.$/i;
+
+/** Lookbehind-free sentence splitter — runs on every browser. */
+export function splitSentences(text: string): string[] {
+  const raw =
     text.replace(/\s+/g, " ").trim().match(/[^.!?]*[.!?]+(?:\s|$)|[^.!?]+$/g) ?? [];
+
+  // Re-join fragments split on abbreviations or decimals ("Dr. Chen said…",
+  // "rose 3.5 percent") so points don't arrive truncated mid-thought.
+  const merged: string[] = [];
+  for (const piece of raw) {
+    const prev = merged[merged.length - 1];
+    if (prev && (ABBREV.test(prev.trim()) || /\d\.$/.test(prev.trim()))) {
+      merged[merged.length - 1] = prev + piece;
+    } else {
+      merged.push(piece);
+    }
+  }
+  const matches = merged;
   return matches
     .map((s) => s.trim())
-    .filter((s) => s.split(" ").filter(Boolean).length >= minWords);
-}
-
-function buildTF(tokens: string[]): Map<string, number> {
-  const tf = new Map<string, number>();
-  const total = tokens.length || 1;
-  for (const t of tokens) tf.set(t, (tf.get(t) || 0) + 1);
-  for (const [k, v] of tf) tf.set(k, v / total);
-  return tf;
-}
-
-function buildIDF(sentences: string[]): Map<string, number> {
-  const N = sentences.length || 1;
-  const df = new Map<string, number>();
-  for (const sent of sentences) {
-    const seen = new Set(tokenize(sent));
-    for (const w of seen) df.set(w, (df.get(w) || 0) + 1);
-  }
-  const idf = new Map<string, number>();
-  for (const [w, d] of df) {
-    idf.set(w, Math.min(6, Math.max(0.1, Math.log(N / d))));
-  }
-  return idf;
-}
-
-export function pointCount(wordCount: number): number {
-  if (wordCount < 500)   return 3;
-  if (wordCount < 1500)  return 5;
-  if (wordCount < 4000)  return 7;
-  if (wordCount < 10000) return 9;
-  return 10;
-}
-
-function redundancyThreshold(wordCount: number): number {
-  if (wordCount < 500)   return 0.45;
-  if (wordCount < 2000)  return 0.55;
-  if (wordCount < 8000)  return 0.60;
-  return 0.65;
-}
-
-export interface ScanResult {
-  points: string[];
-  details: string[];
-  folded: number;
+    .filter((s) => s.split(" ").length >= 6 && isUsableSentence(s));
 }
 
 const toSet = (words: string[]) => new Set(words);
 
-function overlapRatio(a: string[], other: Set<string>, otherLen: number): number {
+function overlapRatio(words: string[], other: Set<string>, otherLen: number): number {
   let shared = 0;
-  for (const w of a) if (other.has(w)) shared++;
-  return shared / (Math.min(a.length, otherLen) || 1);
+  for (const w of words) if (other.has(w)) shared++;
+  return shared / (Math.min(words.length, otherLen) || 1);
 }
 
+/**
+ * @param n number of main points, or 0 / "auto" to scale with document length
+ */
 export function scanDocument(
   text: string,
-  n?: number,
+  n: number | "auto" = "auto",
   title = "",
-  contentType: ContentType = "article"
+  baseSupport = 14
 ): ScanResult {
-  const profile = PROFILES[contentType] ?? PROFILES.article;
-  const list = splitSentences(text, profile.minWords);
-  const wc = wordCount(text);
-  const nPoints = n ?? pointCount(wc);
-  const dupThresh = redundancyThreshold(wc);
+  const all = splitSentences(text);
+  const totalWords = wordCount(text);
+  const depth = depthFor(totalWords, baseSupport);
+  const points_n = !n || n === "auto" ? depth.points : n;
+  const maxSupport = depth.support;
+  const tier = depth.tier;
 
-  if (list.length === 0) return { points: [], details: [], folded: 0 };
-  if (list.length <= nPoints) return { points: list, details: [], folded: 0 };
+  if (all.length === 0)
+    return { points: [], details: [], folded: 0, capped: false, tier };
+  if (all.length <= points_n)
+    return { points: all, details: [], folded: 0, capped: false, tier };
 
-  const tf = buildTF(tokenize(text));
-  const idf = buildIDF(list);
+  const capped = all.length > MAX_SENTENCES;
+  const list = capped ? all.slice(0, MAX_SENTENCES) : all;
+
+  const freq = new Map<string, number>();
+  for (const w of tokenize(text)) freq.set(w, (freq.get(w) || 0) + 1);
   const titleWords = toSet(tokenize(title));
-  const total = list.length;
-  let maxScore = 1;
 
+  let maxScore = 0;
   const scored = list.map((sentence, index) => {
-    const tokens = tokenize(sentence);
-    const unique = [...new Set(tokens)];
-    let tfidfSum = 0;
+    const words = tokenize(sentence);
+    const unique = [...new Set(words)];
+    let sum = 0;
     let titleHits = 0;
     for (const w of unique) {
-      tfidfSum += (tf.get(w) || 0) * (idf.get(w) || 1);
+      sum += freq.get(w) || 0;
       if (titleWords.has(w)) titleHits++;
     }
-    let score = tfidfSum / Math.sqrt(Math.max(unique.length, 1));
-    if (profile.lead) score *= 1 + profile.lead * Math.max(0, 1 - index / 10);
-    if (profile.end)  score *= 1 + profile.end  * Math.max(0, 1 - (total - 1 - index) / 6);
-    if (/\d/.test(sentence)) score *= 1.14;
-    if (CONCLUSION_RE.test(sentence)) score *= 1.10;
-    if (profile.action !== 1 && ACTION_RE.test(sentence)) score *= profile.action;
-    score *= 1 + Math.min(0.4, titleHits * 0.12);
+    let score = sum / Math.sqrt(Math.max(unique.length, 1));
+    score *= 1 + 0.5 * Math.max(0, 1 - index / 10); // lead bias
+    if (/\d/.test(sentence)) score *= 1.12; // concrete facts
+    if (
+      /^(however|therefore|overall|in short|in conclusion|as a result|the study|researchers|scientists|the report)/i.test(
+        sentence
+      )
+    )
+      score *= 1.08;
+    score *= 1 + Math.min(0.4, titleHits * 0.1); // stay on subject
     if (score > maxScore) maxScore = score;
     return { sentence, index, score, words: unique, set: toSet(unique) };
   });
+  // Relative threshold: short documents scored below 1 previously disabled
+  // the filler filter entirely.
+  if (maxScore <= 0) maxScore = 1;
 
   const byScore = [...scored].sort((a, b) => b.score - a.score);
 
+  // Layer 1 — main points.
   const points: typeof scored = [];
   for (const cand of byScore) {
-    if (points.length >= nPoints) break;
-    const dup = points.some((p) => overlapRatio(cand.words, p.set, p.words.length) > dupThresh);
+    if (points.length >= points_n) break;
+    const dup = points.some(
+      (p) => overlapRatio(cand.words, p.set, p.words.length) > 0.55
+    );
     if (!dup) points.push(cand);
   }
-  if (points.length === 0) points.push(...byScore.slice(0, nPoints));
+  if (points.length === 0) points.push(...byScore.slice(0, points_n));
 
+  // Layer 2 — full summary: informative, non-redundant leftovers.
   const pickedIdx = new Set(points.map((p) => p.index));
-  const detailThresh = Math.min(0.7, dupThresh + 0.08);
-
   let rest = byScore.filter((c) => {
     if (pickedIdx.has(c.index)) return false;
-    if (c.words.length < 3) return false;
-    if (c.score < maxScore * 0.22) return false;
-    if (points.some((p) => overlapRatio(c.words, p.set, p.words.length) > dupThresh)) return false;
+    if (c.words.length < 3 || c.score < maxScore * 0.28) return false; // filler
+    if (points.some((p) => overlapRatio(c.words, p.set, p.words.length) > 0.55))
+      return false;
     return true;
   });
 
+  // De-duplicate the leftovers against each other (keep the stronger).
   const details: typeof rest = [];
   for (const cand of rest) {
-    const dup = details.some((d) => overlapRatio(cand.words, d.set, d.words.length) > detailThresh);
+    const dup = details.some(
+      (d) => overlapRatio(cand.words, d.set, d.words.length) > 0.6
+    );
     if (!dup) details.push(cand);
   }
   rest = details;
 
-  const cap = wc > 10000
-    ? Math.min(30, profile.maxSupport * 2)
-    : wc > 4000
-    ? Math.min(22, Math.round(profile.maxSupport * 1.5))
-    : profile.maxSupport;
-
   let folded = 0;
-  if (rest.length > cap) {
-    folded = rest.length - cap;
-    rest = rest.slice(0, cap);
+  if (rest.length > maxSupport) {
+    folded = rest.length - maxSupport;
+    rest = rest.slice(0, maxSupport);
   }
-
   rest.sort((a, b) => a.index - b.index);
   points.sort((a, b) => a.index - b.index);
 
   return {
+    capped,
+    tier,
     points: points.map((p) => p.sentence),
     details: rest.map((d) => d.sentence),
     folded,
@@ -210,13 +215,4 @@ export function wordCount(text: string): number {
 
 export function readTime(text: string): number {
   return Math.max(1, Math.round(wordCount(text) / 220));
-}
-
-export function docLengthLabel(wc: number): string {
-  if (wc < 300)   return "Very short";
-  if (wc < 800)   return "Short";
-  if (wc < 2000)  return "Medium";
-  if (wc < 6000)  return "Long";
-  if (wc < 15000) return "Very long";
-  return "Book-length";
 }

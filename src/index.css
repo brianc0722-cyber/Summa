@@ -13,14 +13,45 @@ html {
 }
 
 body {
-  font-family: "Instrument Sans", system-ui, sans-serif;
+  /* Inter is purpose-built for screens: tall x-height, open apertures,
+     and a disambiguated I / l / 1 — far clearer than Arial at small sizes. */
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
   background: var(--paper);
   color: var(--ink);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-optical-sizing: auto;
+  text-rendering: optimizeLegibility;
+  /* Slight negative tracking counters Inter's generous default spacing;
+     the roomier line-height is what actually makes long text easy to scan. */
+  letter-spacing: -0.011em;
+  line-height: 1.65;
 }
 
+/* Headings: geometric, friendly, and noticeably more legible than a
+   quirky display face while keeping some personality. */
 .font-display {
-  font-family: "Bricolage Grotesque", "Instrument Sans", sans-serif;
+  font-family: "Plus Jakarta Sans", "Inter", system-ui, sans-serif;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+/* Large headings need tighter tracking; small ones need none. */
+h1.font-display,
+h2.font-display {
+  letter-spacing: -0.028em;
+}
+
+/* Numerals line up in stat chips and meta rows. */
+.font-mono,
+code,
+pre {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Comfortable measure for reading passages. */
+p {
+  text-wrap: pretty;
 }
 
 /* Ambient dotted grid */

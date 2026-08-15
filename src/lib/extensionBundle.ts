@@ -10,7 +10,7 @@ const MANIFEST = {
   manifest_version: 3,
   name: "Summa — Summarize any page",
   short_name: "Summa",
-  version: "1.3.0",
+  version: "1.4.0",
   description:
     "A Summarize button on every page you visit: 5 main points plus a full non-redundant summary. Runs locally in your browser — no account, no tracking, works on Gmail and other CSP-locked sites.",
   action: { default_title: "Summarize this page" },
@@ -62,7 +62,26 @@ Everything runs locally. Nothing is sent anywhere.
 export async function buildExtensionZip(): Promise<Blob> {
   const zip = new JSZip();
   const root = zip.folder("extension")!;
-  root.file("manifest.json", JSON.stringify(MANIFEST, null, 2));
+
+  // Ship a toolbar icon when we can reach one. The manifest only references
+  // the file if it actually made it into the zip — a missing icon file makes
+  // Chrome refuse to load the whole extension.
+  const manifest: Record<string, unknown> = { ...MANIFEST };
+  try {
+    const res = await fetch(new URL("./icon-512.png", window.location.href).toString(), {
+      cache: "no-store",
+    });
+    if (res.ok) {
+      root.file("icon-128.png", await res.blob());
+      const sizes = { "16": "icon-128.png", "48": "icon-128.png", "128": "icon-128.png" };
+      manifest.icons = sizes;
+      manifest.action = { ...MANIFEST.action, default_icon: sizes };
+    }
+  } catch {
+    /* no icon available — Chrome falls back to a default tile */
+  }
+
+  root.file("manifest.json", JSON.stringify(manifest, null, 2));
   root.file("background.js", BACKGROUND_JS);
   root.file("prelude.js", PRELUDE_JS);
   root.file("widget.js", WIDGET_SOURCE);

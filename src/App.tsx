@@ -23,7 +23,13 @@ import {
   Newspaper,
   Mail,
   RefreshCw,
+  PenLine,
+  ArrowLeftRight,
 } from "lucide-react";
+// ?raw gives us the exact file contents at build time — byte-for-byte,
+// so users can download engine source instead of hand-copying it.
+import summarizeSrc from "./lib/summarize.ts?raw";
+import bookmarkletSrc from "./lib/bookmarkletSource.ts?raw";
 import { WIDGET_SOURCE, buildBookmarkletHref } from "./lib/bookmarkletSource";
 import { buildExtensionZip } from "./lib/extensionBundle";
 import { readTime, scanDocument, wordCount } from "./lib/summarize";
@@ -92,6 +98,93 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
     }
     return this.props.children;
   }
+}
+
+/* ---------------- Collapsible section wrapper ---------------- */
+
+/**
+ * Purely additive: wraps a section in a header bar that toggles visibility.
+ * Nothing inside is modified, and state persists per-section across visits.
+ */
+function Collapsible({
+  id,
+  title,
+  hint,
+  tone = "light",
+  defaultOpen = true,
+  children,
+}: {
+  id: string;
+  title: string;
+  hint?: string;
+  tone?: "light" | "dark";
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(`summa:sec:${id}`);
+      if (saved !== null) setOpen(saved === "1");
+    } catch {
+      /* private mode — keep the default */
+    }
+    // Respond to the page-wide expand/collapse control.
+    const onAll = (e: Event) => setOpen((e as CustomEvent<boolean>).detail);
+    window.addEventListener("summa:sections", onAll);
+    return () => window.removeEventListener("summa:sections", onAll);
+  }, [id]);
+
+  const toggle = () => {
+    setOpen((o) => {
+      try {
+        localStorage.setItem(`summa:sec:${id}`, o ? "0" : "1");
+      } catch {
+        /* ignore */
+      }
+      return !o;
+    });
+  };
+
+  const dark = tone === "dark";
+
+  return (
+    <div className="mb-3">
+      <button
+        onClick={toggle}
+        aria-expanded={open}
+        aria-controls={`${id}-body`}
+        className={`group flex w-full items-center gap-3 rounded-xl border-2 px-4 py-3 text-left transition-all ${
+          dark
+            ? "border-[#0c1a16] bg-[#0c1a16] text-[#f1f3ee] hover:bg-[#16302a]"
+            : "border-[#0c1a16]/15 bg-white text-[#0c1a16] hover:border-[#0f8a6d]/60"
+        }`}
+      >
+        <ChevronDown
+          size={16}
+          className={`flex-none transition-transform duration-200 ${open ? "" : "-rotate-90"} ${
+            dark ? "text-[#e8a33d]" : "text-[#0f8a6d]"
+          }`}
+        />
+        <span className="font-display text-sm font-extrabold tracking-tight sm:text-base">
+          {title}
+        </span>
+        {hint && (
+          <span
+            className={`ml-auto hidden text-xs font-semibold sm:block ${
+              dark ? "text-[#f1f3ee]/45" : "text-[#0c1a16]/45"
+            }`}
+          >
+            {open ? hint : "click to expand"}
+          </span>
+        )}
+      </button>
+      <div id={`${id}-body`} hidden={!open} className={open ? "mt-4" : ""}>
+        {children}
+      </div>
+    </div>
+  );
 }
 
 /* ---------------- Small copy button ---------------- */
@@ -188,12 +281,16 @@ const scriptCache: Record<string, Promise<void>> = {};
 
 function loadScript(src: string): Promise<void> {
   if (!scriptCache[src]) {
-    scriptCache[src] = new Promise((resolve, reject) => {
+    scriptCache[src] = new Promise<void>((resolve, reject) => {
       const s = document.createElement("script");
       s.src = src;
       s.onload = () => resolve();
-      s.onerror = () => reject(new Error("loader"));
+      s.onerror = () => reject(new Error("Couldn't reach the parser CDN"));
       document.head.appendChild(s);
+    }).catch((err) => {
+      // Never cache a rejection — a flaky network would block every retry.
+      delete scriptCache[src];
+      throw err;
     });
   }
   return scriptCache[src];
@@ -309,6 +406,71 @@ const WB_SAMPLES: Record<string, { label: string; icon: typeof Newspaper; title:
 
 type WbMode = "paste" | "url" | "file";
 
+/** NaturalWrite is a separate app — we only ever link out to it. */
+const NATURALWRITE_URL = "https://naturalwrite-nu.vercel.app";
+
+interface WbResult {
+  title: string;
+  points: string[];
+  details: string[];
+  folded: number;
+  tier: string;
+  insights: InsightSet;
+}
+
+/** Structured Markdown export — good for notes apps, docs, and drafting. */
+function toMarkdown(r: WbResult, source?: string | null): string {
+  const L: string[] = [`# ${r.title}`, ""];
+  if (source) L.push(`*Source: ${source}*`, "");
+  L.push(
+    `*${r.tier} · ${r.insights.stats.words.toLocaleString()} words · ${r.insights.stats.readMins} min read*`,
+    "",
+    "## Main points",
+    ""
+  );
+  r.points.forEach((p, i) => L.push(`${i + 1}. ${p}`));
+  if (r.details.length) {
+    L.push("", "## Full summary", "", r.details.join(" "));
+    if (r.folded) L.push("", `*(+${r.folded} more supporting sentences folded in.)*`);
+  }
+  if (r.insights.numbers.length) {
+    L.push("", "## By the numbers", "");
+    r.insights.numbers.forEach((s) => L.push(`- ${s}`));
+  }
+  if (r.insights.tensions.length) {
+    L.push("", "## Tensions & turning points", "");
+    r.insights.tensions.forEach((s) => L.push(`- ${s}`));
+  }
+  if (r.insights.actions.length) {
+    L.push("", "## What comes next", "");
+    r.insights.actions.forEach((s) => L.push(`- ${s}`));
+  }
+  if (r.insights.terms.length) {
+    L.push("", "## Themes", "", r.insights.terms.map((t) => t.word).join(" · "));
+  }
+  return L.join("\n");
+}
+
+/** A drafting brief — phrased for writing from, not just reading. */
+function toDraftBrief(r: WbResult, source?: string | null): string {
+  const L: string[] = [`Topic: ${r.title}`];
+  if (source) L.push(`Source: ${source}`);
+  L.push("", "Key points to cover:");
+  r.points.forEach((p, i) => L.push(`${i + 1}. ${p}`));
+  if (r.insights.numbers.length) {
+    L.push("", "Supporting facts and figures:");
+    r.insights.numbers.forEach((s) => L.push(`- ${s}`));
+  }
+  if (r.insights.tensions.length) {
+    L.push("", "Counterpoints to address:");
+    r.insights.tensions.forEach((s) => L.push(`- ${s}`));
+  }
+  if (r.insights.terms.length) {
+    L.push("", `Themes: ${r.insights.terms.slice(0, 6).map((t) => t.word).join(", ")}`);
+  }
+  return L.join("\n");
+}
+
 function Workbench() {
   const [mode, setMode] = useState<WbMode>("paste");
   const [text, setText] = useState("");
@@ -320,26 +482,51 @@ function Workbench() {
   const [busy, setBusy] = useState(false);
   const [runKey, setRunKey] = useState(0);
   const [expanded, setExpanded] = useState<number | null>(null);
-  const [result, setResult] = useState<{
-    title: string;
-    points: string[];
-    details: string[];
-    folded: number;
-    insights: InsightSet;
-  } | null>(null);
+  const [result, setResult] = useState<WbResult | null>(null);
+  const [history, setHistory] = useState<{ title: string; tier: string; words: number; text: string }[]>([]);
+  const [copied, setCopied] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("summa:wb:history");
+      if (raw) setHistory(JSON.parse(raw));
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const pushHistory = (title: string, tier: string, words: number, text: string) => {
+    setHistory((prev) => {
+      const next = [{ title, tier, words, text: text.slice(0, 20000) }, ...prev.filter((h) => h.title !== title)].slice(0, 5);
+      try {
+        localStorage.setItem("summa:wb:history", JSON.stringify(next));
+      } catch {
+        /* quota or private mode — history is best-effort */
+      }
+      return next;
+    });
+  };
+
+  const flash = (key: string) => {
+    setCopied(key);
+    window.setTimeout(() => setCopied(null), 1600);
+  };
 
   const runAnalysis = (t: string, label: string) => {
     setBusy(true);
     setExpanded(null);
     window.setTimeout(() => {
-      const scan = scanDocument(t, 5, label);
+      const scan = scanDocument(t, "auto", label);
+      const ins = deriveInsights(t, scan.points, scan.details);
       setResult({
         title: label,
         points: scan.points,
         details: scan.details,
         folded: scan.folded,
-        insights: deriveInsights(t, scan.points, scan.details),
+        tier: scan.tier,
+        insights: ins,
       });
+      pushHistory(label, scan.tier, ins.stats.words, t);
       setRunKey((k) => k + 1);
       setBusy(false);
     }, 650);
@@ -452,22 +639,37 @@ function Workbench() {
     }
   };
 
-  const onFile = (f: File | null) => {
+  const onFile = async (f: File | null) => {
     if (!f) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      let t = String(reader.result || "");
-      if (/\.html?$/i.test(f.name)) {
-        t = t
-          .replace(/<script[\s\S]*?<\/script>/gi, " ")
-          .replace(/<style[\s\S]*?<\/style>/gi, " ")
-          .replace(/<[^>]+>/g, " ");
+    setErrMsg(null);
+    try {
+      let t: string;
+      // Route binary formats through the real parsers — readAsText on a PDF
+      // produces binary noise that looks like a valid (but nonsense) summary.
+      if (/\.pdf$/i.test(f.name)) t = await extractPdf(f);
+      else if (/\.docx$/i.test(f.name)) t = await extractDocx(f);
+      else if (/\.(txt|md|markdown|text|html?|csv|json)$/i.test(f.name)) {
+        t = await f.text();
+        if (/\.html?$/i.test(f.name)) {
+          t = t
+            .replace(/<script[\s\S]*?<\/script>/gi, " ")
+            .replace(/<style[\s\S]*?<\/style>/gi, " ")
+            .replace(/<[^>]+>/g, " ");
+        }
+      } else {
+        throw new Error(
+          "Unsupported file type — use .txt, .md, .html, .pdf, or .docx."
+        );
       }
+      t = t.replace(/\s+/g, " ").trim();
+      if (t.length < 120)
+        throw new Error("No readable text found (a scanned-image PDF has none).");
       setText(t);
       setSource(f.name);
       runAnalysis(t, f.name);
-    };
-    reader.readAsText(f);
+    } catch (e) {
+      setErrMsg(e instanceof Error ? e.message : "Couldn't read that file.");
+    }
   };
 
   const ins = result?.insights;
@@ -503,6 +705,12 @@ function Workbench() {
 
   return (
     <section id="workbench" className="reveal pb-20">
+      <Collapsible
+        id="workbench"
+        tone="dark"
+        title="The Workbench — analyze your own material"
+        hint="paste · URL · upload"
+      >
       <div className="overflow-hidden rounded-2xl border-2 border-[#0c1a16] bg-white shadow-[10px_10px_0_#0c1a16]">
         {/* Console header */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b-2 border-[#0c1a16] bg-[#0c1a16] px-6 py-5 sm:px-8">
@@ -666,21 +874,65 @@ function Workbench() {
                   Drop a .txt, .md, or .html file
                 </span>
                 <span className="text-xs text-[#0c1a16]/50">
-                  Transcripts, exports, saved articles — read instantly, never uploaded.
+                  .txt · .md · .html · .pdf · .docx — read instantly, never uploaded.
                 </span>
                 <input
                   type="file"
-                  accept=".txt,.md,.markdown,.text,.html,.htm"
+                  accept=".txt,.md,.markdown,.text,.html,.htm,.pdf,.docx"
                   className="hidden"
                   onChange={(e) => onFile(e.target.files?.[0] || null)}
                 />
               </label>
             )}
 
+            {mode === "file" && errMsg && (
+              <p className="mt-3 rounded-lg border-l-4 border-[#e8695a] bg-[#e8695a]/10 p-3 text-xs leading-relaxed text-[#b3402f]">
+                {errMsg}
+              </p>
+            )}
+
             {source && (
               <p className="mt-3 flex items-center gap-1.5 text-xs font-semibold text-[#0f8a6d]">
                 <Link2 size={12} /> Source: <span className="truncate">{source}</span>
               </p>
+            )}
+
+            {/* Recent scans */}
+            {history.length > 0 && (
+              <div className="mt-5 border-t border-[#0c1a16]/10 pt-4">
+                <p className="mb-2 flex items-center gap-1.5 text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#0c1a16]/45">
+                  <RefreshCw size={11} /> Recent scans
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {history.map((h, i) => (
+                    <button
+                      key={i}
+                      onClick={() => {
+                        setText(h.text);
+                        setSource(h.title);
+                        runAnalysis(h.text, h.title);
+                      }}
+                      title={`${h.words.toLocaleString()} words · ${h.tier}`}
+                      className="max-w-[190px] truncate rounded-full border border-[#0c1a16]/15 bg-[#f7f9f5] px-3 py-1 text-[11px] font-semibold text-[#0c1a16]/65 transition-all hover:-translate-y-0.5 hover:border-[#0f8a6d] hover:text-[#0f8a6d]"
+                    >
+                      {h.title}
+                    </button>
+                  ))}
+                  <button
+                    onClick={() => {
+                      setHistory([]);
+                      try {
+                        localStorage.removeItem("summa:wb:history");
+                      } catch {
+                        /* ignore */
+                      }
+                    }}
+                    className="rounded-full px-2 py-1 text-[11px] font-semibold text-[#0c1a16]/35 transition-colors hover:text-[#b3402f]"
+                  >
+                    clear
+                  </button>
+                </div>
+              </div>
             )}
           </div>
 
@@ -718,6 +970,9 @@ function Workbench() {
               <div key={runKey} className="space-y-6">
                 {/* Stats */}
                 <div className="point-in flex flex-wrap gap-2" style={{ animationDelay: "0.05s" }}>
+                  <span className="rounded-full bg-[#0c1a16] px-3 py-1 text-xs font-extrabold text-[#e8a33d] shadow-sm">
+                    {result.tier}
+                  </span>
                   {[
                     [`${ins!.stats.words.toLocaleString()}`, "words"],
                     [`${ins!.stats.sentences}`, "sentences"],
@@ -838,11 +1093,75 @@ function Workbench() {
                     )}
                   </div>
                 )}
+
+                {/* Export & handoff */}
+                <div className="point-in rounded-xl border border-[#0c1a16]/15 bg-white p-4" style={{ animationDelay: "1.4s" }}>
+                  <p className="mb-3 text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#0c1a16]/50">
+                    Take it with you
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => {
+                        navigator.clipboard?.writeText(toMarkdown(result, source));
+                        flash("md");
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-[#0c1a16]/20 bg-[#f7f9f5] px-3 py-2 text-xs font-bold text-[#0c1a16] transition-all hover:-translate-y-0.5 hover:border-[#0f8a6d] hover:text-[#0f8a6d]"
+                    >
+                      {copied === "md" ? <Check size={13} className="text-[#0f8a6d]" /> : <Copy size={13} />}
+                      {copied === "md" ? "Copied!" : "Copy Markdown"}
+                    </button>
+                    <button
+                      onClick={() => {
+                        const blob = new Blob([toMarkdown(result, source)], { type: "text/markdown" });
+                        const u = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = u;
+                        a.download = `${result.title.replace(/[^\w.-]+/g, "-").slice(0, 60)}-summary.md`;
+                        document.body.appendChild(a);
+                        a.click();
+                        a.remove();
+                        window.setTimeout(() => URL.revokeObjectURL(u), 4000);
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-[#0c1a16]/20 bg-[#f7f9f5] px-3 py-2 text-xs font-bold text-[#0c1a16] transition-all hover:-translate-y-0.5 hover:border-[#0f8a6d] hover:text-[#0f8a6d]"
+                    >
+                      <Download size={13} /> Download .md
+                    </button>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard?.writeText(
+                          result.points.map((p, i) => `${i + 1}. ${p}`).join("\n")
+                        );
+                        flash("pts");
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-[#0c1a16]/20 bg-[#f7f9f5] px-3 py-2 text-xs font-bold text-[#0c1a16] transition-all hover:-translate-y-0.5 hover:border-[#0f8a6d] hover:text-[#0f8a6d]"
+                    >
+                      {copied === "pts" ? <Check size={13} className="text-[#0f8a6d]" /> : <Copy size={13} />}
+                      {copied === "pts" ? "Copied!" : "Copy points only"}
+                    </button>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard?.writeText(toDraftBrief(result, source));
+                        flash("nw");
+                        window.setTimeout(() => window.open(NATURALWRITE_URL, "_blank", "noopener"), 350);
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-[#2f4a80] px-3 py-2 text-xs font-bold text-white shadow-sm transition-all hover:-translate-y-0.5 hover:bg-[#22345c]"
+                      title="Copies a drafting brief, then opens NaturalWrite"
+                    >
+                      {copied === "nw" ? <Check size={13} /> : <PenLine size={13} />}
+                      {copied === "nw" ? "Brief copied — opening…" : "Draft in NaturalWrite"}
+                    </button>
+                  </div>
+                  <p className="mt-2.5 text-[11px] leading-relaxed text-[#0c1a16]/50">
+                    The draft button copies a writing brief — points, figures, and counterpoints —
+                    then opens NaturalWrite in a new tab so you can paste and start writing.
+                  </p>
+                </div>
               </div>
             )}
           </div>
         </div>
       </div>
+      </Collapsible>
     </section>
   );
 }
@@ -874,6 +1193,7 @@ function Site() {
     []
   );
   const [scanKey, setScanKey] = useState(0);
+  const [allOpen, setAllOpen] = useState(true);
 
   /* "Watch it scan" — your-own-material input (paste ≤7.5k words, or any-length file) */
   const [proofMode, setProofMode] = useState<"sample" | "paste" | "file">("sample");
@@ -887,6 +1207,8 @@ function Site() {
     points: string[];
     details: string[];
     folded: number;
+    capped: boolean;
+    tier: string;
   } | null>(null);
 
   const proofWords = wordCount(proofText);
@@ -896,13 +1218,15 @@ function Site() {
     setProofBusy(true);
     setProofNote(null);
     window.setTimeout(() => {
-      const scan = scanDocument(text, 5, title);
+      const scan = scanDocument(text, "auto", title);
       setProofResult({
         title,
         words: wordCount(text),
         points: scan.points,
         details: scan.details,
         folded: scan.folded,
+        capped: scan.capped,
+        tier: scan.tier,
       });
       setProofKey((k) => k + 1);
       setProofBusy(false);
@@ -969,7 +1293,9 @@ function Site() {
     try {
       const base = window.location.href.split("#")[0].split("?")[0];
       const root = base.endsWith("/") ? base : base.slice(0, base.lastIndexOf("/") + 1);
-      const res = await fetch(root);
+      // no-store: the service worker is cache-first for assets, which could
+      // otherwise hand out the previous deploy's copy of the site.
+      const res = await fetch(root, { cache: "no-store" });
       if (!res.ok) throw new Error("unavailable");
       const html = await res.text();
       if (!html.includes("<div id=\"root\">")) throw new Error("not the app");
@@ -1007,7 +1333,7 @@ function Site() {
         ["icon-512.png", root + "icon-512.png"],
       ];
       for (const [name, url] of entries) {
-        const res = await fetch(url);
+        const res = await fetch(url, { cache: "no-store" });
         if (!res.ok) {
           if (name === "index.html") throw new Error("missing index.html");
           continue; // PWA extras are optional; the site works without them
@@ -1127,30 +1453,63 @@ function Site() {
       <div className="blob-b pointer-events-none absolute top-[60%] -right-48 h-[500px] w-[500px] rounded-full bg-[#e8a33d]/12 blur-3xl" />
 
       {/* Header */}
-      <header className="relative border-b border-[#0c1a16]/10">
+      <header className="relative border-b border-[#0f8a6d]/25 bg-gradient-to-r from-[#dff0e6] via-[#cfe8db] to-[#e4f2ea] shadow-[0_1px_0_rgba(255,255,255,0.6)_inset]">
         <div className="mx-auto flex max-w-4xl items-center justify-between px-5 py-4">
           <span className="flex items-center gap-2.5">
-            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#0c1a16] text-[#e8a33d]">
+            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#0f8a6d] text-[#f7fbf8] shadow-sm ring-1 ring-white/50">
               <Bolt size={18} fill="currentColor" />
             </span>
-            <span className="font-display text-xl font-extrabold tracking-tight">Summa</span>
+            <span className="font-display text-xl font-extrabold tracking-tight text-[#0a4034]">
+              Summa
+            </span>
           </span>
           <span className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                const next = !allOpen;
+                setAllOpen(next);
+                window.dispatchEvent(new CustomEvent("summa:sections", { detail: next }));
+                try {
+                  ["proof", "workbench", "install", "troubleshoot", "deploy"].forEach((k) =>
+                    localStorage.setItem(`summa:sec:${k}`, next ? "1" : "0")
+                  );
+                } catch {
+                  /* ignore */
+                }
+              }}
+              className="inline-flex items-center gap-1.5 rounded-full border border-[#0f8a6d]/30 bg-white/80 px-3 py-1.5 text-xs font-bold text-[#0a4034]/80 backdrop-blur-sm transition-all hover:-translate-y-0.5 hover:border-[#0f8a6d] hover:bg-white hover:text-[#0f8a6d]"
+              title={allOpen ? "Collapse every section" : "Expand every section"}
+            >
+              <ChevronDown
+                size={12}
+                className={`transition-transform ${allOpen ? "" : "-rotate-90"}`}
+              />
+              {allOpen ? "Collapse all" : "Expand all"}
+            </button>
             <a
               href="#workbench"
-              className="hidden items-center gap-1.5 rounded-full border border-[#0c1a16]/20 bg-white px-3 py-1.5 text-xs font-bold text-[#0c1a16]/70 transition-all hover:-translate-y-0.5 hover:border-[#0f8a6d] hover:text-[#0f8a6d] sm:inline-flex"
+              className="hidden items-center gap-1.5 rounded-full border border-[#0f8a6d]/30 bg-white/80 px-3 py-1.5 text-xs font-bold text-[#0a4034]/80 backdrop-blur-sm transition-all hover:-translate-y-0.5 hover:border-[#0f8a6d] hover:bg-white hover:text-[#0f8a6d] sm:inline-flex"
             >
               <Sparkles size={12} /> Workbench
             </a>
             <a
+              href="https://naturalwrite-nu.vercel.app"
+              target="_blank"
+              rel="noreferrer"
+              title="NaturalWrite — the writing half of the pair"
+              className="hidden items-center gap-1.5 rounded-full border border-[#4a6fb8]/35 bg-white/80 px-3 py-1.5 text-xs font-bold text-[#2f4a80] backdrop-blur-sm transition-all hover:-translate-y-0.5 hover:border-[#4a6fb8] hover:bg-white md:inline-flex"
+            >
+              <PenLine size={12} /> NaturalWrite
+            </a>
+            <a
               href="#deploy"
-              className="hidden items-center gap-1.5 rounded-full border border-[#0c1a16]/20 bg-white px-3 py-1.5 text-xs font-bold text-[#0c1a16]/70 transition-all hover:-translate-y-0.5 hover:border-[#e8a33d] hover:text-[#a86f1a] sm:inline-flex"
+              className="hidden items-center gap-1.5 rounded-full border border-[#0f8a6d]/30 bg-white/80 px-3 py-1.5 text-xs font-bold text-[#0a4034]/80 backdrop-blur-sm transition-all hover:-translate-y-0.5 hover:border-[#e8a33d] hover:bg-white hover:text-[#a86f1a] sm:inline-flex"
             >
               <Globe size={12} /> Deploy on Vercel
             </a>
             <a
               href="#deploy"
-              className="rounded-full border border-[#0c1a16]/20 bg-white px-3 py-1.5 font-mono text-xs font-bold tracking-tight text-[#0c1a16]/70 transition-all hover:-translate-y-0.5 hover:border-[#e8a33d] hover:text-[#a86f1a]"
+              className="rounded-full border border-[#0f8a6d]/30 bg-white/80 px-3 py-1.5 font-mono text-xs font-bold tracking-tight text-[#0a4034]/80 backdrop-blur-sm transition-all hover:-translate-y-0.5 hover:border-[#e8a33d] hover:bg-white hover:text-[#a86f1a]"
               title="Not live yet — open the deploy guide"
             >
               → contentsummarize.com
@@ -1210,6 +1569,12 @@ function Site() {
 
         {/* STEP 1 — proof */}
         <section id="proof" className="reveal pb-16">
+          <Collapsible
+            id="proof"
+            tone="dark"
+            title="1 · Watch it scan — the sample, or your own words"
+            hint="nothing to install"
+          >
           <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
             <div>
               <p className="mb-2 flex items-center gap-2 text-xs font-extrabold uppercase tracking-[0.2em] text-[#0f8a6d]">
@@ -1410,6 +1775,9 @@ function Site() {
               <div>
                 <p className="mb-1 flex items-center gap-2 text-[10px] font-extrabold uppercase tracking-[0.18em] text-[#0f8a6d]">
                   <Sparkles size={11} fill="currentColor" /> Tailored summary
+                  <span className="rounded-full bg-[#0c1a16] px-2 py-0.5 text-[9px] text-[#e8a33d]">
+                    {proofResult.tier}
+                  </span>
                 </p>
                 <h3 className="font-display text-2xl font-bold tracking-tight break-words">
                   {proofResult.title}
@@ -1419,6 +1787,7 @@ function Site() {
                 <span className="text-xs font-semibold text-[#0c1a16]/45">
                   {proofResult.words.toLocaleString()} words ·{" "}
                   {Math.max(1, Math.round(proofResult.words / 220))} min read
+                  {proofResult.capped && " · first 4,000 sentences analysed"}
                 </span>
                 <button
                   onClick={() => {
@@ -1468,6 +1837,7 @@ function Site() {
             </p>
           </div>
           )}
+          </Collapsible>
         </section>
 
         {/* Workbench */}
@@ -1492,30 +1862,46 @@ function Site() {
         </section>
 
         {/* STEP 2 — choose a path */}
-        <div id="install" className="reveal mb-8">
+        <div id="install" className="reveal">
+          <Collapsible
+            id="install"
+            tone="dark"
+            title="2 · Install it — start with the extension"
+            hint="recommended, plus a fallback"
+          >
+        <div className="mb-8">
           <p className="mb-2 flex items-center gap-2 text-xs font-extrabold uppercase tracking-[0.2em] text-[#0f8a6d]">
             <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#0c1a16] text-[10px] text-[#e8a33d]">2</span>
             Step two · pick one
           </p>
           <h2 className="font-display text-3xl font-extrabold tracking-tight sm:text-4xl">
-            Two ways to install — choose one
+            Install it — the extension is the one you want
           </h2>
           <p className="mt-3 max-w-2xl text-base leading-relaxed text-[#0c1a16]/70">
-            <strong className="text-[#0c1a16]">Path A (bookmark)</strong> takes 60 seconds — just
-            copy and paste. <strong className="text-[#0c1a16]">Path B (extension)</strong> takes a
-            couple of minutes but also works on Gmail, GitHub, and X. You only need one of them.
+            The <strong className="text-[#0c1a16]">Chrome extension</strong> is the full experience:
+            the button appears on every page by itself and works everywhere, Gmail and GitHub
+            included. The <strong className="text-[#0c1a16]">bookmark</strong> below it is a
+            fallback for Firefox, Safari, or machines where extensions are blocked. You only need
+            one.
           </p>
         </div>
+        </Collapsible>
+        </div>
 
-        {/* THE install card */}
-        <section className="reveal overflow-hidden rounded-2xl border-2 border-[#0c1a16] bg-white shadow-[10px_10px_0_#0c1a16]">
-          {/* Path A header */}
-          <div className="flex items-center gap-2 border-b-2 border-[#0c1a16] bg-[#e8a33d] px-5 py-2.5 sm:px-7">
+        {/* Install cards — extension first via flex order, no JSX moved */}
+        <div className="flex flex-col gap-10">
+        {/* Bookmark fallback card (rendered second) */}
+        <section className="reveal order-2 overflow-hidden rounded-2xl border-2 border-[#0c1a16] bg-white shadow-[10px_10px_0_#0c1a16]">
+          {/* Fallback header */}
+          <div className="flex flex-wrap items-center gap-2 border-b-2 border-[#0c1a16] bg-[#e8a33d] px-5 py-2.5 sm:px-7">
             <span className="rounded-full bg-[#0c1a16] px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#e8a33d]">
-              Path A
+              Fallback
             </span>
             <span className="font-display text-sm font-extrabold text-[#0c1a16]">
-              The 60-second bookmark — works on news, blogs, Wikipedia, docs
+              The 60-second bookmark — for Firefox, Safari, or locked-down machines
+            </span>
+            <span className="ml-auto hidden text-[11px] font-semibold text-[#0c1a16]/60 lg:block">
+              won't run on Gmail · GitHub · X
             </span>
           </div>
           {/* Step 1 */}
@@ -1610,15 +1996,15 @@ function Site() {
           </div>
         </section>
 
-        {/* Chrome extension path */}
-        <section className="reveal mt-10">
+        {/* Chrome extension path — shown first via flex order */}
+        <section className="reveal order-1">
           <div className="overflow-hidden rounded-2xl border-2 border-[#0f8a6d] bg-white shadow-[10px_10px_0_#0f8a6d]">
-            <div className="flex items-center gap-2 border-b-2 border-[#0f8a6d] bg-[#0f8a6d] px-5 py-2.5 sm:px-7">
+            <div className="flex flex-wrap items-center gap-2 border-b-2 border-[#0f8a6d] bg-[#0f8a6d] px-5 py-2.5 sm:px-7">
               <span className="rounded-full bg-[#0c1a16] px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#e8a33d]">
-                Path B
+                Recommended
               </span>
               <span className="font-display text-sm font-extrabold text-white">
-                Chrome extension — the powerful one, works on Gmail, GitHub, X
+                Chrome extension — appears on every page, works on Gmail, GitHub, X
               </span>
             </div>
             <div className="flex flex-wrap items-center justify-between gap-3 border-b-2 border-[#0f8a6d] bg-[#0c1a16] px-5 py-4 sm:px-7">
@@ -1741,9 +2127,15 @@ function Site() {
             </div>
           </div>
         </section>
+        </div>
 
-        {/* Not showing up? — always visible */}
+        {/* Not showing up? */}
         <section className="reveal pb-10">
+          <Collapsible
+            id="troubleshoot"
+            title="3 · Test it — and what to do if the button doesn't appear"
+            hint="verified test pages"
+          >
           <div className="rounded-2xl border-2 border-[#e8a33d] bg-[#e8a33d]/10 p-6 sm:p-8">
             <p className="mb-2 flex items-center gap-2 text-xs font-extrabold uppercase tracking-[0.2em] text-[#a86f1a]">
               <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#0c1a16] text-[10px] text-[#e8a33d]">3</span>
@@ -1823,10 +2215,18 @@ function Site() {
               </ul>
             </details>
           </div>
+          </Collapsible>
         </section>
 
         {/* Vercel deploy guide */}
         <section id="deploy" className="reveal pb-20">
+          <Collapsible
+            id="deploy"
+            tone="dark"
+            title="Put it live on Vercel"
+            hint="hosting & domain"
+            defaultOpen={false}
+          >
           <div className="overflow-hidden rounded-2xl border-2 border-[#0c1a16] bg-[#0c1a16] text-[#f1f3ee] shadow-[10px_10px_0_#0f8a6d]">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#f1f3ee]/10 px-6 py-5 sm:px-8">
               <span className="flex items-center gap-3">
@@ -2188,6 +2588,7 @@ vercel --prod   # ships it live`}
               </div>
             </div>
           </div>
+          </Collapsible>
         </section>
 
         {/* Other ways (collapsed) */}
@@ -2306,7 +2707,49 @@ npm run build      # production bundle → dist/`}
                       Vercel rebuilds automatically and the live site matches Arena.
                     </p>
                   </div>
-                  <div>
+                  <div className="sm:col-span-2">
+                    <p className="mb-2 text-xs font-bold text-[#f1f3ee]/80">
+                      Grab an engine file — exact copy, no transcription
+                    </p>
+                    <div className="mb-4 flex flex-wrap gap-2">
+                      {[
+                        { name: "summarize.ts", src: summarizeSrc, note: "the scan engine" },
+                        { name: "bookmarkletSource.ts", src: bookmarkletSrc, note: "the widget" },
+                        { name: "widget.js", src: WIDGET_SOURCE, note: "extension copy" },
+                      ].map((f) => (
+                        <span key={f.name} className="inline-flex overflow-hidden rounded-lg border border-[#f1f3ee]/25">
+                          <button
+                            onClick={() => {
+                              const blob = new Blob([f.src], { type: "text/plain" });
+                              const u = URL.createObjectURL(blob);
+                              const a = document.createElement("a");
+                              a.href = u;
+                              a.download = f.name;
+                              document.body.appendChild(a);
+                              a.click();
+                              a.remove();
+                              window.setTimeout(() => URL.revokeObjectURL(u), 4000);
+                            }}
+                            className="inline-flex items-center gap-1.5 bg-[#f1f3ee]/10 px-3 py-2 font-mono text-[11px] font-bold text-[#7fd4bd] transition-colors hover:bg-[#f1f3ee]/20"
+                            title={`Download ${f.name} — ${f.note}`}
+                          >
+                            <Download size={12} /> {f.name}
+                          </button>
+                          <button
+                            onClick={() => navigator.clipboard?.writeText(f.src)}
+                            className="border-l border-[#f1f3ee]/20 px-2.5 py-2 text-[11px] font-bold text-[#f1f3ee]/60 transition-colors hover:bg-[#f1f3ee]/15 hover:text-[#f1f3ee]"
+                            title="Copy the full file to your clipboard"
+                          >
+                            copy
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                    <p className="mb-4 border-l-2 border-[#e8a33d] pl-2 text-[11px] leading-relaxed text-[#e8a33d]/90">
+                      Paste into <strong>Notepad or VS Code</strong>, never WordPad — WordPad saves
+                      rich text and turns straight quotes into curly ones, which breaks the build.
+                      Downloading is safer than copying either way.
+                    </p>
                     <p className="mb-2 text-xs font-bold text-[#f1f3ee]/80">File map</p>
                     <ul className="space-y-1.5 font-mono text-[11px] leading-relaxed text-[#f1f3ee]/70">
                       <li><span className="text-[#e8a33d]">src/App.tsx</span> — the whole page: proof, Workbench, install paths, deploy guide</li>
@@ -2329,6 +2772,71 @@ npm run build      # production bundle → dist/`}
         </section>
       </main>
 
+      {/* Companion app — NaturalWrite */}
+      <section className="relative mx-auto max-w-4xl px-5 pb-16">
+        <div className="reveal overflow-hidden rounded-2xl border-2 border-[#0c1a16] bg-white shadow-[10px_10px_0_#4a6fb8]">
+          <div className="flex flex-wrap items-center gap-2 border-b-2 border-[#0c1a16] bg-gradient-to-r from-[#dfe6f5] via-[#d2ddf0] to-[#e4eaf7] px-5 py-2.5 sm:px-7">
+            <span className="rounded-full bg-[#0c1a16] px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#9fb8e8]">
+              Companion
+            </span>
+            <span className="font-display text-sm font-extrabold text-[#22345c]">
+              Two halves of the same workflow
+            </span>
+          </div>
+
+          <div className="grid gap-6 p-6 sm:p-8 lg:grid-cols-[1fr_auto_1fr] lg:items-center">
+            {/* Summa side */}
+            <div className="rounded-xl border border-[#0f8a6d]/30 bg-[#0f8a6d]/8 p-5">
+              <p className="mb-2 flex items-center gap-2 text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#0a5c49]">
+                <Bolt size={12} fill="currentColor" /> You are here
+              </p>
+              <h3 className="font-display mb-1.5 text-lg font-extrabold text-[#0c1a16]">
+                Summa — read faster
+              </h3>
+              <p className="text-sm leading-relaxed text-[#0c1a16]/70">
+                Turns any page, PDF, or inbox into 5 main points plus a full summary. The intake
+                half: get through the material.
+              </p>
+            </div>
+
+            {/* Connector */}
+            <div className="flex items-center justify-center">
+              <span className="flex h-11 w-11 items-center justify-center rounded-full border-2 border-[#0c1a16] bg-[#f7f9f5] text-[#0c1a16] shadow-sm">
+                <ArrowLeftRight size={18} />
+              </span>
+            </div>
+
+            {/* NaturalWrite side */}
+            <div className="rounded-xl border border-[#4a6fb8]/35 bg-[#4a6fb8]/8 p-5">
+              <p className="mb-2 flex items-center gap-2 text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#2f4a80]">
+                <PenLine size={12} /> Companion app
+              </p>
+              <h3 className="font-display mb-1.5 text-lg font-extrabold text-[#0c1a16]">
+                NaturalWrite — write better
+              </h3>
+              <p className="mb-4 text-sm leading-relaxed text-[#0c1a16]/70">
+                Takes what you've gathered and helps you shape it into clear, natural prose. The
+                output half: turn understanding into writing.
+              </p>
+              <a
+                href="https://naturalwrite-nu.vercel.app"
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-2 rounded-full bg-[#2f4a80] px-5 py-2.5 text-sm font-bold text-white shadow-[0_8px_20px_rgba(47,74,128,0.3)] transition-all hover:-translate-y-0.5 hover:bg-[#22345c]"
+              >
+                <PenLine size={14} /> Open NaturalWrite
+                <ExternalLink size={12} />
+              </a>
+            </div>
+          </div>
+
+          <p className="border-t border-[#0c1a16]/10 bg-[#f7f9f5] px-6 py-3 text-center text-xs leading-relaxed text-[#0c1a16]/60 sm:px-8">
+            <strong className="text-[#0c1a16]">Paired use:</strong> summarize a source here, copy
+            the points, then open NaturalWrite to draft from them — research in, writing out.
+          </p>
+        </div>
+      </section>
+
       <footer className="relative border-t border-[#0c1a16]/10 py-8">
         <div className="mx-auto flex max-w-4xl flex-col items-center justify-between gap-2 px-5 text-sm text-[#0c1a16]/55 sm:flex-row">
           <span className="flex items-center gap-2">
@@ -2338,12 +2846,23 @@ npm run build      # production bundle → dist/`}
             <span className="font-display font-bold text-[#0c1a16]">Summa</span>
           </span>
           <span>Runs entirely in your browser. Nothing leaves your machine.</span>
-          <a
-            href="#deploy"
-            className="font-mono font-bold text-[#0c1a16]/70 hover:text-[#0f8a6d] transition-colors"
-          >
-            → deploy to contentsummarize.com
-          </a>
+          <span className="flex items-center gap-3">
+            <a
+              href="https://naturalwrite-nu.vercel.app"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 font-bold text-[#2f4a80] transition-colors hover:text-[#4a6fb8]"
+            >
+              <PenLine size={12} /> NaturalWrite
+            </a>
+            <span className="text-[#0c1a16]/25">·</span>
+            <a
+              href="#deploy"
+              className="font-mono font-bold text-[#0c1a16]/70 hover:text-[#0f8a6d] transition-colors"
+            >
+              → deploy
+            </a>
+          </span>
         </div>
       </footer>
     </div>

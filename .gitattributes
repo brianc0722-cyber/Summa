@@ -1,0 +1,9 @@
+# Normalize line endings so commits stay clean across Windows/macOS/Linux
+# and Git stops warning about LF -> CRLF on every add.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.zip binary
