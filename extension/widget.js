@@ -131,6 +131,34 @@
 
     // Report depth scales with the material: a short post gets a tight
     // summary, a long report gets a proportionally fuller one.
+    var OPENERS = /^(however|moreover|furthermore|in addition|additionally|that said|nevertheless|nonetheless|indeed|notably|importantly|of course|in fact|meanwhile|similarly|consequently|therefore|thus|as a result|for example|for instance|in other words|on the other hand|at the same time|in particular|ultimately|overall|finally|first|second|third)\b[,:]?\s+/i;
+    var PHRASES = [
+      [/\bin order to\b/gi, "to"], [/\bdue to the fact that\b/gi, "because"],
+      [/\bfor the purpose of\b/gi, "for"], [/\bin the event that\b/gi, "if"],
+      [/\bwith regard to\b/gi, "about"], [/\bwith respect to\b/gi, "about"],
+      [/\ba large number of\b/gi, "many"], [/\bthe majority of\b/gi, "most"],
+      [/\bat this point in time\b/gi, "now"], [/\bprior to\b/gi, "before"],
+      [/\bsubsequent to\b/gi, "after"], [/\bdespite the fact that\b/gi, "although"],
+      [/\bit is important to note that\b/gi, ""], [/\bit should be noted that\b/gi, ""],
+      [/\bis able to\b/gi, "can"], [/\bare able to\b/gi, "can"],
+      [/\bhas the ability to\b/gi, "can"], [/\bon a regular basis\b/gi, "regularly"],
+      [/\bwhether or not\b/gi, "whether"], [/\beach and every\b/gi, "every"],
+      [/\bin close proximity to\b/gi, "near"], [/\bend result\b/gi, "result"]
+    ];
+
+    // Local, deterministic rewriting — tightens wording without inventing
+    // anything, so a regenerated point says the same thing differently.
+    function paraphrase(sentence) {
+      var s = String(sentence).trim();
+      for (var i = 0; i < 2; i++) s = s.replace(OPENERS, "");
+      s = s.replace(/\s*\([^)]{0,80}\)\s*/g, " ");
+      for (var p = 0; p < PHRASES.length; p++) s = s.replace(PHRASES[p][0], PHRASES[p][1]);
+      s = s.replace(/\s{2,}/g, " ").replace(/\s+([,.;:])/g, "$1").trim();
+      if (s) s = s.charAt(0).toUpperCase() + s.slice(1);
+      if (s && !/[.!?]$/.test(s)) s += ".";
+      return s;
+    }
+
     function depthFor(words, pr) {
       if (words < 250) return { points: 3, support: Math.min(pr.maxSupport, 5), tier: "Brief" };
       if (words < 1200) return { points: 5, support: pr.maxSupport, tier: "Standard" };
@@ -141,11 +169,12 @@
 
     // Two-layer scan: the n main points, then every other informative,
     // non-redundant sentence as the full summary.
-    function scan(text, n, title, pr) {
+    function scan(text, n, title, pr, variant) {
       var list = sentences(text, pr.minWords);
       var totalWords = text.trim() ? text.trim().split(/\s+/).length : 0;
       var depth = depthFor(totalWords, pr);
       if (!n) n = depth.points;
+      variant = variant || 0;
       var maxSupport = depth.support;
       if (!list.length) return { points: ["No readable text found on this page."], details: [], folded: 0, tier: depth.tier };
       if (list.length <= n) return { points: list, details: [], folded: 0, tier: depth.tier };
@@ -186,16 +215,27 @@
 
       var byScore = scored.slice().sort(function (a, b) { return b.score - a.score; });
 
-      var points = [];
-      for (var p = 0; p < byScore.length && points.length < n; p++) {
+      // Deeper pool so "Regenerate" can pick different sentences.
+      var pool = [];
+      for (var p = 0; p < byScore.length && pool.length < n + 6; p++) {
         var cand = byScore[p];
         var dup = false;
-        for (var q = 0; q < points.length; q++) {
-          if (overlapRatio(cand.words, points[q].set, points[q].words.length) > 0.55) { dup = true; break; }
+        for (var q = 0; q < pool.length; q++) {
+          if (overlapRatio(cand.words, pool[q].set, pool[q].words.length) > 0.55) { dup = true; break; }
         }
-        if (!dup) points.push(cand);
+        if (!dup) pool.push(cand);
       }
-      if (!points.length) points = byScore.slice(0, n);
+      if (!pool.length) pool = byScore.slice(0, n);
+
+      var points;
+      if (!variant || pool.length <= n) {
+        points = pool.slice(0, n);
+      } else {
+        var spare = pool.length - n;
+        var offset = ((variant - 1) % spare) + 1;
+        var rest2 = pool.slice(1);
+        points = [pool[0]].concat(rest2.slice(offset)).concat(rest2.slice(0, offset)).slice(0, n);
+      }
 
       var pickedIdx = Object.create(null);
       for (var m = 0; m < points.length; m++) pickedIdx[points[m].i] = 1;
@@ -221,9 +261,12 @@
       rest.sort(function (a, b) { return a.i - b.i; });
       points.sort(function (a, b) { return a.i - b.i; });
 
+      var fin = function (a) {
+        return variant ? a.map(paraphrase) : a;
+      };
       return {
-        points: points.map(function (o) { return o.sent; }),
-        details: rest.map(function (o) { return o.sent; }),
+        points: fin(points.map(function (o) { return o.sent; })),
+        details: fin(rest.map(function (o) { return o.sent; })),
         folded: folded,
         tier: depth.tier
       };
@@ -322,8 +365,9 @@
       "#psum-scope button{font-size:11px;font-weight:700;padding:4px 11px;border-radius:999px;border:1px solid #dbe2da;background:#f7f9f5;color:#6b7a74;cursor:pointer;transition:all .15s}",
       "#psum-scope button:hover{border-color:#0f8a6d;color:#0f8a6d}",
       "#psum-scope button.on{background:#0c1a16;color:#fff;border-color:#0c1a16}",
-      "#psum-sel{margin-left:auto;font-size:11px;font-weight:700;padding:4px 8px;border-radius:8px;border:1px solid #dbe2da;background:#f7f9f5;color:#0c1a16;cursor:pointer;max-width:160px}",
-      "#psum-sel:hover{border-color:#0f8a6d}",
+      "#psum-sel{margin-left:auto;font-size:11px;font-weight:700;padding:4px 8px;border-radius:8px;border:1px solid #dbe2da;background:#f7f9f5;color:#0c1a16;cursor:pointer;max-width:140px}",
+      "#psum-sel:hover,#psum-n:hover{border-color:#0f8a6d}",
+      "#psum-n{font-size:11px;font-weight:700;padding:4px 6px;border-radius:8px;border:1px solid #dbe2da;background:#f7f9f5;color:#0c1a16;cursor:pointer}",
       "#psum-urlrow{display:none;gap:6px;margin-bottom:10px}",
       "#psum-urlrow.open{display:flex}",
       "#psum-url{flex:1;min-width:0;font-size:12px;padding:6px 9px;border-radius:8px;border:1px solid #dbe2da;background:#fff;color:#0c1a16;outline:none;font-family:inherit}",
@@ -429,7 +473,7 @@
         scanTitle = document.title;
       }
       var words = text.trim() ? text.trim().split(/\s+/).length : 0;
-      var result = scan(text, 0, scanTitle, pr);
+      var result = scan(text, host.__psumN || 0, scanTitle, pr, host.__psumVariant || 0);
       var pts = result.points;
       var details = result.details;
 
@@ -440,6 +484,10 @@
           TYPE_OPTIONS[oi][1] + "</option>";
       }
 
+      var nOpts = '<option value="0"' + (host.__psumN ? "" : " selected") + ">Auto</option>";
+      for (var nn = 5; nn <= 20; nn++) {
+        nOpts += '<option value="' + nn + '"' + (host.__psumN === nn ? " selected" : "") + ">" + nn + " points</option>";
+      }
       var listHtml = "";
       for (var li = 0; li < pts.length; li++) {
         listHtml += "<li><span>" + (li + 1) + "</span><p>" + esc(pts[li]) + "</p></li>";
@@ -460,7 +508,8 @@
         '<button data-s="page" class="' + (scope === "page" && !host.__psumUrl ? "on" : "") + '" title="Scan the entire page">Entire page</button>' +
         '<button data-s="article" class="' + (scope === "article" && !host.__psumUrl ? "on" : "") + '" title="Scan only the main article region">Article only</button>' +
         '<button id="psum-urltoggle" class="' + (host.__psumUrl ? "on" : "") + '" title="Summarize any URL">From URL</button></div>' +
-        '<select id="psum-sel" title="Content type">' + opts + "</select></div>" +
+        '<select id="psum-sel" title="Content type">' + opts + "</select>" +
+        '<select id="psum-n" title="Number of main points">' + nOpts + "</select></div>" +
         '<div id="psum-urlrow' + (host.__psumUrlRowOpen ? " open" : "") + '"><input id="psum-url" type="url" placeholder="Paste any https:// link and press Fetch" value="' + escAttr(host.__psumUrlDraft || "") + '"><button id="psum-go">Fetch</button></div>' +
         '<div id="psum-meta"><span class="type">' + TYPE_LABEL[resolved] + (chosen === "auto" ? " · auto" : "") + "</span>" +
         '<span class="tier">' + esc(result.tier || "") + "</span><span>" + pts.length + " main points</span>" +
@@ -470,7 +519,7 @@
         (host.__psumUrl ? "Summary of " + esc(hostLabel(host.__psumUrl.href)) : (scope === "page" ? "Whole page scanned — here is what matters" : "Article scanned — here is what matters")) +
         "</p>" + (host.__psumUrl ? '<button id="psum-urlback">← back to this page</button>' : "") + "</div>" +
         '<ol id="psum-list">' + listHtml + "</ol>" + detailHtml + "</div>" +
-        '<div id="psum-foot"><button id="psum-copy">Copy</button><button id="psum-again">Rescan</button></div>';
+        '<div id="psum-foot"><button id="psum-copy">Copy</button><button id="psum-listen">Listen</button><button id="psum-again">Regenerate</button></div>';
 
       var scopeBtns = panel.querySelectorAll("#psum-scope button");
       for (var sb = 0; sb < scopeBtns.length; sb++) {
@@ -500,8 +549,42 @@
         render();
       };
 
-      panel.querySelector("#psum-close").onclick = function () { panel.style.display = "none"; };
-      panel.querySelector("#psum-again").onclick = render;
+      panel.querySelector("#psum-n").onchange = function () {
+        host.__psumN = Number(this.value) || 0;
+        render();
+      };
+
+      // Regenerate: rotate to different source sentences and rephrase.
+      panel.querySelector("#psum-again").onclick = function () {
+        host.__psumVariant = (host.__psumVariant || 0) + 1;
+        render();
+      };
+
+      // Read aloud via the browser's speech engine.
+      panel.querySelector("#psum-listen").onclick = function () {
+        var b = this;
+        try {
+          if (!window.speechSynthesis) { b.textContent = "N/A"; return; }
+          if (window.speechSynthesis.speaking) {
+            window.speechSynthesis.cancel();
+            b.textContent = "Listen";
+            return;
+          }
+          var say = document.title + ". ";
+          for (var si = 0; si < pts.length; si++) say += "Point " + (si + 1) + ". " + pts[si] + " ";
+          if (details.length) say += "Full summary. " + details.join(" ");
+          var u = new SpeechSynthesisUtterance(say);
+          u.onend = function () { b.textContent = "Listen"; };
+          u.onerror = function () { b.textContent = "Listen"; };
+          window.speechSynthesis.speak(u);
+          b.textContent = "Stop";
+        } catch (e) { b.textContent = "Listen"; }
+      };
+
+      panel.querySelector("#psum-close").onclick = function () {
+        try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
+        panel.style.display = "none";
+      };
       panel.querySelector("#psum-copy").onclick = function () {
         var b = panel.querySelector("#psum-copy");
         var copied = "MAIN POINTS — " + TYPE_LABEL[resolved] + (host.__psumUrl ? " · " + host.__psumUrl.href : "") + "\n";

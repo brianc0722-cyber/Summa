@@ -10,7 +10,7 @@ const MANIFEST = {
   manifest_version: 3,
   name: "Summa — Summarize any page",
   short_name: "Summa",
-  version: "1.4.0",
+  version: "1.5.0",
   description:
     "A Summarize button on every page you visit: 5 main points plus a full non-redundant summary. Runs locally in your browser — no account, no tracking, works on Gmail and other CSP-locked sites.",
   action: { default_title: "Summarize this page" },

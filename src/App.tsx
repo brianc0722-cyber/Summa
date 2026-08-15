@@ -25,6 +25,11 @@ import {
   RefreshCw,
   PenLine,
   ArrowLeftRight,
+  ListOrdered,
+  Volume2,
+  Pause,
+  Square,
+  Map as MapIcon,
 } from "lucide-react";
 // ?raw gives us the exact file contents at build time — byte-for-byte,
 // so users can download engine source instead of hand-copying it.
@@ -402,6 +407,242 @@ const WB_SAMPLES: Record<string, { label: string; icon: typeof Newspaper; title:
   },
 };
 
+/* ---------------- Point-count selector ---------------- */
+
+const POINT_CHOICES = Array.from({ length: 16 }, (_, i) => i + 5); // 5…20
+
+function PointCount({
+  value,
+  onChange,
+  dark,
+}: {
+  value: number;
+  onChange: (n: number) => void;
+  dark?: boolean;
+}) {
+  return (
+    <label
+      className={`inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs font-bold transition-colors ${
+        dark
+          ? "border-[#f1f3ee]/25 bg-[#f1f3ee]/10 text-[#f1f3ee]/80"
+          : "border-[#0c1a16]/20 bg-white text-[#0c1a16]/70"
+      }`}
+    >
+      <ListOrdered size={13} className={dark ? "text-[#e8a33d]" : "text-[#0f8a6d]"} />
+      <span className="hidden sm:inline">Points</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className={`cursor-pointer rounded border-0 bg-transparent pr-1 text-xs font-bold outline-none ${
+          dark ? "text-[#f1f3ee]" : "text-[#0c1a16]"
+        }`}
+      >
+        {POINT_CHOICES.map((n) => (
+          <option key={n} value={n} className="text-[#0c1a16]">
+            {n}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/* ---------------- Read-aloud ---------------- */
+
+function ReadAloud({ getText, dark }: { getText: () => string; dark?: boolean }) {
+  const [state, setState] = useState<"idle" | "playing" | "paused">("idle");
+  const [rate, setRate] = useState(1);
+  const supported = typeof window !== "undefined" && "speechSynthesis" in window;
+
+  // Never leave speech running when the view changes.
+  useEffect(() => {
+    return () => {
+      try {
+        window.speechSynthesis?.cancel();
+      } catch {
+        /* ignore */
+      }
+    };
+  }, []);
+
+  if (!supported) return null;
+
+  const stop = () => {
+    window.speechSynthesis.cancel();
+    setState("idle");
+  };
+
+  const play = () => {
+    if (state === "paused") {
+      window.speechSynthesis.resume();
+      setState("playing");
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(getText());
+    u.rate = rate;
+    u.onend = () => setState("idle");
+    u.onerror = () => setState("idle");
+    window.speechSynthesis.speak(u);
+    setState("playing");
+  };
+
+  const pause = () => {
+    window.speechSynthesis.pause();
+    setState("paused");
+  };
+
+  const btn = dark
+    ? "border-[#f1f3ee]/25 bg-[#f1f3ee]/10 text-[#f1f3ee]/85 hover:bg-[#f1f3ee]/20"
+    : "border-[#0c1a16]/20 bg-white text-[#0c1a16] hover:border-[#0f8a6d] hover:text-[#0f8a6d]";
+
+  return (
+    <div className="inline-flex items-center gap-1.5">
+      <button
+        onClick={state === "playing" ? pause : play}
+        className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-bold transition-all ${btn}`}
+        title={state === "playing" ? "Pause" : "Read the summary aloud"}
+      >
+        {state === "playing" ? <Pause size={13} /> : <Volume2 size={13} />}
+        {state === "playing" ? "Pause" : state === "paused" ? "Resume" : "Listen"}
+      </button>
+      {state !== "idle" && (
+        <button
+          onClick={stop}
+          className={`rounded-lg border px-2 py-1.5 text-xs font-bold transition-all ${btn}`}
+          title="Stop"
+        >
+          <Square size={11} />
+        </button>
+      )}
+      <select
+        value={rate}
+        onChange={(e) => {
+          setRate(Number(e.target.value));
+          if (state !== "idle") stop();
+        }}
+        className={`cursor-pointer rounded-lg border px-1.5 py-1.5 text-[11px] font-bold outline-none transition-all ${btn}`}
+        title="Playback speed"
+      >
+        {[0.75, 1, 1.25, 1.5].map((r) => (
+          <option key={r} value={r} className="text-[#0c1a16]">
+            {r}×
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+/* ---------------- Summary graphics ---------------- */
+
+function SummaryVisuals({
+  terms,
+  positions,
+  numbers,
+  totalPoints,
+}: {
+  terms: { word: string; count: number }[];
+  positions: number[];
+  numbers: string[];
+  totalPoints: number;
+}) {
+  const top = terms.slice(0, 6);
+  const max = Math.max(...top.map((t) => t.count), 1);
+  // Pull the leading figure out of each numeric sentence for a stat card.
+  const figures = numbers
+    .map((s) => {
+      const m = s.match(/(\$?\d[\d,.]*\s*(?:%|percent|million|billion|thousand|trillion)?)/i);
+      return m ? { value: m[1].trim(), context: s } : null;
+    })
+    .filter(Boolean)
+    .slice(0, 4) as { value: string; context: string }[];
+
+  if (!top.length && !positions.length && !figures.length) return null;
+
+  return (
+    <div className="space-y-4">
+      {/* Theme weight bars */}
+      {top.length > 0 && (
+        <div className="rounded-xl border border-[#0c1a16]/12 bg-white p-4">
+          <p className="mb-3 flex items-center gap-1.5 text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#0c1a16]/50">
+            <BarChart3 size={12} /> Theme weight
+          </p>
+          <div className="space-y-2">
+            {top.map((t) => (
+              <div key={t.word} className="flex items-center gap-2.5">
+                <span className="w-24 shrink-0 truncate text-right text-[11px] font-semibold text-[#0c1a16]/70">
+                  {t.word}
+                </span>
+                <div className="h-2.5 flex-1 overflow-hidden rounded-full bg-[#0c1a16]/8">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-[#0f8a6d] to-[#7fd4bd] transition-all duration-700"
+                    style={{ width: `${Math.max(6, (t.count / max) * 100)}%` }}
+                  />
+                </div>
+                <span className="w-6 text-[10px] font-bold tabular-nums text-[#0c1a16]/45">
+                  {t.count}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Coverage map */}
+      {positions.length > 0 && (
+        <div className="rounded-xl border border-[#0c1a16]/12 bg-white p-4">
+          <p className="mb-3 flex items-center gap-1.5 text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#0c1a16]/50">
+            <MapIcon size={12} /> Coverage — where the points came from
+          </p>
+          <div className="relative h-9 rounded-lg bg-gradient-to-r from-[#0f8a6d]/10 via-[#0f8a6d]/5 to-[#e8a33d]/10">
+            {positions.map((p, i) => (
+              <span
+                key={i}
+                className="absolute top-1/2 flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-white bg-[#0c1a16] text-[9px] font-bold text-[#e8a33d] shadow-sm"
+                style={{ left: `${4 + p * 92}%` }}
+                title={`Point ${i + 1} — ${Math.round(p * 100)}% through the document`}
+              >
+                {i + 1}
+              </span>
+            ))}
+          </div>
+          <div className="mt-1.5 flex justify-between text-[10px] font-semibold text-[#0c1a16]/40">
+            <span>start</span>
+            <span>
+              {totalPoints} points spread across the document
+            </span>
+            <span>end</span>
+          </div>
+        </div>
+      )}
+
+      {/* Figure cards */}
+      {figures.length > 0 && (
+        <div className="rounded-xl border border-[#0c1a16]/12 bg-white p-4">
+          <p className="mb-3 flex items-center gap-1.5 text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#0c1a16]/50">
+            <TrendingUp size={12} /> Key figures
+          </p>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {figures.map((f, i) => (
+              <div
+                key={i}
+                className="rounded-lg border border-[#0f8a6d]/25 bg-[#0f8a6d]/8 p-3"
+                title={f.context}
+              >
+                <p className="font-display text-xl font-extrabold text-[#0a5c49]">{f.value}</p>
+                <p className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-[#0c1a16]/60">
+                  {f.context.length > 90 ? f.context.slice(0, 90) + "…" : f.context}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ---------------- Workbench ---------------- */
 
 type WbMode = "paste" | "url" | "file";
@@ -415,6 +656,7 @@ interface WbResult {
   details: string[];
   folded: number;
   tier: string;
+  positions: number[];
   insights: InsightSet;
 }
 
@@ -482,6 +724,9 @@ function Workbench() {
   const [busy, setBusy] = useState(false);
   const [runKey, setRunKey] = useState(0);
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [pointCount, setPointCount] = useState(5);
+  const [variant, setVariant] = useState(0);
+  const lastRun = useRef<{ text: string; label: string } | null>(null);
   const [result, setResult] = useState<WbResult | null>(null);
   const [history, setHistory] = useState<{ title: string; tier: string; words: number; text: string }[]>([]);
   const [copied, setCopied] = useState<string | null>(null);
@@ -512,11 +757,14 @@ function Workbench() {
     window.setTimeout(() => setCopied(null), 1600);
   };
 
-  const runAnalysis = (t: string, label: string) => {
+  const runAnalysis = (t: string, label: string, v = 0, n = pointCount) => {
     setBusy(true);
     setExpanded(null);
+    lastRun.current = { text: t, label };
     window.setTimeout(() => {
-      const scan = scanDocument(t, "auto", label);
+      // variant > 0 rotates sentence selection and rephrases, so a
+      // regenerate reads differently while making the same points.
+      const scan = scanDocument(t, n, label, 14, { variant: v, rephrase: v > 0 });
       const ins = deriveInsights(t, scan.points, scan.details);
       setResult({
         title: label,
@@ -524,12 +772,25 @@ function Workbench() {
         details: scan.details,
         folded: scan.folded,
         tier: scan.tier,
+        positions: scan.positions,
         insights: ins,
       });
       pushHistory(label, scan.tier, ins.stats.words, t);
       setRunKey((k) => k + 1);
       setBusy(false);
     }, 650);
+  };
+
+  const regenerate = () => {
+    if (!lastRun.current) return;
+    const v = variant + 1;
+    setVariant(v);
+    runAnalysis(lastRun.current.text, lastRun.current.label, v);
+  };
+
+  const changeCount = (n: number) => {
+    setPointCount(n);
+    if (lastRun.current) runAnalysis(lastRun.current.text, lastRun.current.label, variant, n);
   };
 
   const runFromText = () => {
@@ -973,6 +1234,11 @@ function Workbench() {
                   <span className="rounded-full bg-[#0c1a16] px-3 py-1 text-xs font-extrabold text-[#e8a33d] shadow-sm">
                     {result.tier}
                   </span>
+                  {variant > 0 && (
+                    <span className="rounded-full bg-[#e8a33d] px-3 py-1 text-xs font-extrabold text-[#0c1a16] shadow-sm">
+                      rewritten v{variant + 1}
+                    </span>
+                  )}
                   {[
                     [`${ins!.stats.words.toLocaleString()}`, "words"],
                     [`${ins!.stats.sentences}`, "sentences"],
@@ -984,6 +1250,25 @@ function Workbench() {
                       {l}
                     </span>
                   ))}
+                </div>
+
+                {/* Controls: count · listen · regenerate */}
+                <div className="point-in flex flex-wrap items-center gap-2" style={{ animationDelay: "0.1s" }}>
+                  <PointCount value={pointCount} onChange={changeCount} />
+                  <ReadAloud
+                    getText={() =>
+                      `${result.title}. ` +
+                      result.points.map((p, i) => `Point ${i + 1}. ${p}`).join(" ") +
+                      (result.details.length ? ` Full summary. ${result.details.join(" ")}` : "")
+                    }
+                  />
+                  <button
+                    onClick={regenerate}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-[#0c1a16]/20 bg-white px-3 py-1.5 text-xs font-bold text-[#0c1a16] transition-all hover:-translate-y-0.5 hover:border-[#0f8a6d] hover:text-[#0f8a6d]"
+                    title="Re-word the summary using different source sentences"
+                  >
+                    <RefreshCw size={13} /> Regenerate
+                  </button>
                 </div>
 
                 {/* Points with expand */}
@@ -1032,6 +1317,16 @@ function Workbench() {
                     </li>
                   ))}
                 </ol>
+
+                {/* Graphics */}
+                <div className="point-in" style={{ animationDelay: "0.75s" }}>
+                  <SummaryVisuals
+                    terms={ins!.terms}
+                    positions={result.positions}
+                    numbers={ins!.numbers}
+                    totalPoints={result.points.length}
+                  />
+                </div>
 
                 {/* Insight cards */}
                 <div className="grid gap-3 sm:grid-cols-3">
