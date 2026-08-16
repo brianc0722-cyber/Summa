@@ -1,6 +1,6 @@
 # Summa — summarize any page on the internet
 
-One click returns **5 main points** plus a **full non-redundant summary** of whatever
+One click returns **3 to 20 adaptive main points** (or a count you choose) plus a **full non-redundant summary** of whatever
 you're reading. Everything runs locally in the browser: no account, no API key,
 no server, nothing sent anywhere.
 
@@ -43,16 +43,42 @@ npm run build   # production bundle → dist/
 ```
 src/App.tsx                  the entire website: proof scanner, Workbench,
                              install paths, deploy guide, insight engine
-src/lib/summarize.ts         scan engine — 5 points + full summary
+src/lib/summarize.ts         scan engine — 3-20 adaptive points + full summary
+src/lib/summarize.test.ts    the test suite for the engine above (see below)
 src/lib/bookmarkletSource.ts the widget, as a bookmarklet / ZIP payload
 src/lib/extensionBundle.ts   builds the downloadable extension ZIP
 extension/widget.js          the widget, as the Chrome extension copy
 extension/manifest.json      MV3 permissions + auto-inject on every page
 public/sw.js                 offline cache, network-first for pages
+scripts/check-parity.mjs     fails the build if the 3 scanner copies drift
 ```
 
-> **One rule when editing:** `extension/widget.js` and `src/lib/bookmarkletSource.ts`
-> are two copies of the same scanner. Change them together or they drift.
+> **One rule when editing:** `src/lib/summarize.ts`, `src/lib/bookmarkletSource.ts`,
+> and `extension/widget.js` are three copies of the same scanner — the site's
+> module, the bookmarklet payload, and the extension's plain-JS build. Change
+> scoring, filtering, or UI wiring in all three together, or run
+> `npm run check:parity` to catch what you missed before it ships.
+
+### One-time setup: wire in tests + the parity check
+
+These two npm scripts don't exist yet — add them to `package.json` once:
+
+```json
+"scripts": {
+  "dev": "vite",
+  "build": "vite build",
+  "preview": "vite preview",
+  "test": "vitest run",
+  "check:parity": "node scripts/check-parity.mjs",
+  "prebuild": "npm run check:parity"
+}
+```
+
+`prebuild` is an npm lifecycle hook — it runs automatically before `build`
+without needing to touch the `build` script itself, so a Vercel deploy can
+never ship if the three scanner copies have drifted. Run `npm test` before
+every commit that touches `summarize.ts`, `bookmarkletSource.ts`, or
+`widget.js`.
 
 ---
 

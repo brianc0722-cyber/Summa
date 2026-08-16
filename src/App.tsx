@@ -25,11 +25,6 @@ import {
   RefreshCw,
   PenLine,
   ArrowLeftRight,
-  ListOrdered,
-  Volume2,
-  Pause,
-  Square,
-  Map as MapIcon,
 } from "lucide-react";
 // ?raw gives us the exact file contents at build time — byte-for-byte,
 // so users can download engine source instead of hand-copying it.
@@ -38,13 +33,6 @@ import bookmarkletSrc from "./lib/bookmarkletSource.ts?raw";
 import { WIDGET_SOURCE, buildBookmarkletHref } from "./lib/bookmarkletSource";
 import { buildExtensionZip } from "./lib/extensionBundle";
 import { readTime, scanDocument, wordCount } from "./lib/summarize";
-import {
-  FEED_SOURCES,
-  fetchFeed,
-  fetchTrendingWiki,
-  fetchWikiFullText,
-  type LiveArticle,
-} from "./lib/feeds";
 import JSZip from "jszip";
 
 /* ---------------- Reveal-on-scroll (failsafe) ---------------- */
@@ -281,10 +269,26 @@ function InstallButton() {
 
 /* ---------------- Sample article for the live test ---------------- */
 
-const SAMPLE = {
+const INITIAL_SAMPLE = {
   title: "How Machine Learning Is Quietly Rewriting Radiology",
   body: `Radiology departments around the world are facing an unprecedented workload. The number of imaging studies ordered each year has grown far faster than the supply of trained radiologists, leading to fatigue, burnout, and diagnostic delays. Into this gap stepped a new generation of machine learning models trained on millions of annotated scans. These systems do not replace radiologists; instead, they act as a tireless second reader, flagging subtle anomalies that a tired human eye might miss after a twelve-hour shift. In controlled trials, radiologists working alongside such models detected early-stage lung nodules at significantly higher rates than either the model or the physician alone. The most successful deployments treat the algorithm as a triage tool, pushing the most suspicious cases to the top of the worklist so that urgent patients are seen first. Skeptics rightly point out that models can inherit biases from their training data and may fail silently on equipment they have never seen. As a result, regulators now demand continuous monitoring and clear accountability for every automated suggestion. The emerging consensus is that the future of radiology is neither human nor machine, but a careful partnership in which each covers the other's blind spots.`,
 };
+
+/**
+ * Every network call in Summa gets a hard deadline — an unresponsive
+ * endpoint (Wikipedia, a reader proxy, an arbitrary URL the user pasted)
+ * should never be able to leave a button spinning forever with no way out.
+ * Hoisted to module scope so every fetch site shares one implementation
+ * instead of each call site inventing its own (or, as found in a build
+ * audit, some call sites having no timeout at all).
+ */
+function fetchWithTimeout(url: string, ms = 8000, init?: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), ms);
+  return fetch(url, { ...init, signal: controller.signal }).finally(() =>
+    window.clearTimeout(timer)
+  );
+}
 
 /* ---------------- Document extractors (loaded on demand from CDN) ---------------- */
 
@@ -399,7 +403,7 @@ function deriveInsights(text: string, points: string[], details: string[]): Insi
 /* ---------------- Workbench samples ---------------- */
 
 const WB_SAMPLES: Record<string, { label: string; icon: typeof Newspaper; title: string; body: string }> = {
-  news: { label: "News article", icon: Newspaper, title: SAMPLE.title, body: SAMPLE.body },
+  news: { label: "News article", icon: Newspaper, title: INITIAL_SAMPLE.title, body: INITIAL_SAMPLE.body },
   report: {
     label: "Data report",
     icon: BarChart3,
@@ -414,455 +418,6 @@ const WB_SAMPLES: Record<string, { label: string; icon: typeof Newspaper; title:
   },
 };
 
-/* ---------------- Live trending feed ---------------- */
-
-function LiveFeed({ onScan }: { onScan: (text: string, label: string) => void }) {
-  const [sourceId, setSourceId] = useState<string>("trending");
-  const [items, setItems] = useState<LiveArticle[]>([]);
-  const [idx, setIdx] = useState(0);
-  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
-  const [err, setErr] = useState<string>("");
-  const [auto, setAuto] = useState(true);
-  const [loadingFull, setLoadingFull] = useState(false);
-
-  const load = async (id: string) => {
-    setState("loading");
-    setErr("");
-    setIdx(0);
-    try {
-      const list =
-        id === "trending"
-          ? await fetchTrendingWiki()
-          : await fetchFeed(FEED_SOURCES.find((s) => s.id === id)!);
-      if (!list.length) throw new Error("No articles returned");
-      setItems(list);
-      setState("ready");
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Couldn't reach that source");
-      setState("error");
-    }
-  };
-
-  useEffect(() => {
-    load(sourceId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceId]);
-
-  // Gentle rotation so the panel feels alive without hijacking attention.
-  useEffect(() => {
-    if (!auto || state !== "ready" || items.length < 2) return;
-    const t = window.setInterval(() => setIdx((i) => (i + 1) % items.length), 7000);
-    return () => window.clearInterval(t);
-  }, [auto, state, items.length]);
-
-  const current = items[idx];
-
-  const scanCurrent = async () => {
-    if (!current) return;
-    // Wikipedia links can give us the whole article, not just the teaser.
-    if (/wikipedia\.org\/wiki\//.test(current.link)) {
-      setLoadingFull(true);
-      try {
-        const full = await fetchWikiFullText(current.link);
-        setLoadingFull(false);
-        if (full.length > 400) return onScan(full, current.title);
-      } catch {
-        setLoadingFull(false);
-      }
-    }
-    onScan(`${current.title}. ${current.summary}`, current.title);
-  };
-
-  return (
-    <div className="overflow-hidden rounded-2xl border-2 border-[#0c1a16] bg-white shadow-[10px_10px_0_#e8a33d]">
-      {/* Header */}
-      <div className="flex flex-wrap items-center gap-2 border-b-2 border-[#0c1a16] bg-gradient-to-r from-[#dff0e6] via-[#cfe8db] to-[#e4f2ea] px-5 py-3 sm:px-7">
-        <span className="relative flex h-2.5 w-2.5">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#0f8a6d] opacity-60" />
-          <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-[#0f8a6d]" />
-        </span>
-        <span className="font-display text-sm font-extrabold text-[#0a4034]">
-          Live — trending right now
-        </span>
-        <button
-          onClick={() => setAuto((a) => !a)}
-          className="ml-auto rounded-full border border-[#0f8a6d]/30 bg-white/70 px-2.5 py-1 text-[10px] font-bold text-[#0a4034]/75 transition-colors hover:bg-white"
-          title={auto ? "Pause rotation" : "Resume rotation"}
-        >
-          {auto ? "❚❚ pause" : "▶ play"}
-        </button>
-        <button
-          onClick={() => load(sourceId)}
-          className="rounded-full border border-[#0f8a6d]/30 bg-white/70 px-2.5 py-1 text-[10px] font-bold text-[#0a4034]/75 transition-colors hover:bg-white"
-          title="Refresh this feed"
-        >
-          <RefreshCw size={10} className="inline" /> refresh
-        </button>
-      </div>
-
-      {/* Source tabs */}
-      <div className="flex flex-wrap gap-1.5 border-b border-[#0c1a16]/10 bg-[#f7f9f5] px-4 py-2.5">
-        {[{ id: "trending", label: "Most read" }, ...FEED_SOURCES].map((s) => (
-          <button
-            key={s.id}
-            onClick={() => setSourceId(s.id)}
-            className={`rounded-full px-3 py-1 text-[11px] font-bold transition-all ${
-              sourceId === s.id
-                ? "bg-[#0c1a16] text-[#f1f3ee] shadow-sm"
-                : "bg-white text-[#0c1a16]/60 hover:text-[#0f8a6d]"
-            }`}
-          >
-            {s.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Body */}
-      <div className="min-h-[190px] p-5 sm:p-6">
-        {state === "loading" && (
-          <div className="space-y-2.5 pt-2">
-            <div className="h-4 w-2/3 animate-pulse rounded bg-[#0c1a16]/10" />
-            <div className="h-3 w-full animate-pulse rounded bg-[#0c1a16]/8" />
-            <div className="h-3 w-5/6 animate-pulse rounded bg-[#0c1a16]/8" />
-            <p className="pt-2 text-xs font-semibold text-[#0c1a16]/45">Fetching live articles…</p>
-          </div>
-        )}
-
-        {state === "error" && (
-          <div className="rounded-xl border-l-4 border-[#e8695a] bg-[#e8695a]/10 p-4">
-            <p className="text-sm font-semibold text-[#b3402f]">Couldn't load this feed</p>
-            <p className="mt-1 text-xs leading-relaxed text-[#b3402f]/85">
-              {err}. Public feeds occasionally rate-limit or go offline — try another source or
-              hit refresh. You can always paste an article into the Workbench below instead.
-            </p>
-            <button
-              onClick={() => load(sourceId)}
-              className="mt-3 rounded-full bg-[#b3402f] px-4 py-1.5 text-xs font-bold text-white transition-colors hover:bg-[#8f2f22]"
-            >
-              Try again
-            </button>
-          </div>
-        )}
-
-        {state === "ready" && current && (
-          <div key={idx} className="panel-in">
-            <div className="mb-2 flex flex-wrap items-center gap-2">
-              <span className="rounded-full bg-[#0f8a6d] px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-[0.12em] text-white">
-                {current.source}
-              </span>
-              {current.published && (
-                <span className="text-[11px] font-semibold text-[#0c1a16]/40">
-                  {new Date(current.published).toLocaleDateString(undefined, {
-                    month: "short",
-                    day: "numeric",
-                  })}
-                </span>
-              )}
-              <span className="ml-auto text-[11px] font-bold tabular-nums text-[#0c1a16]/35">
-                {idx + 1} / {items.length}
-              </span>
-            </div>
-
-            <h3 className="font-display mb-2 text-xl font-extrabold leading-snug tracking-tight text-[#0c1a16]">
-              {current.title}
-            </h3>
-            <p className="mb-4 line-clamp-3 text-sm leading-relaxed text-[#0c1a16]/70">
-              {current.summary}
-            </p>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                onClick={scanCurrent}
-                disabled={loadingFull}
-                className="inline-flex items-center gap-2 rounded-full bg-[#0f8a6d] px-5 py-2.5 text-sm font-bold text-white shadow-[0_8px_20px_rgba(15,138,109,0.3)] transition-all hover:-translate-y-0.5 hover:bg-[#0a5c49] disabled:opacity-60"
-              >
-                <Bolt size={14} fill="currentColor" />
-                {loadingFull ? "Loading article…" : "Summarize this"}
-              </button>
-              {current.link && (
-                <a
-                  href={current.link}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 rounded-full border border-[#0c1a16]/20 px-3.5 py-2 text-xs font-bold text-[#0c1a16]/70 transition-all hover:-translate-y-0.5 hover:border-[#0f8a6d] hover:text-[#0f8a6d]"
-                >
-                  Read original <ExternalLink size={11} />
-                </a>
-              )}
-              <span className="ml-auto flex gap-1">
-                <button
-                  onClick={() => setIdx((i) => (i - 1 + items.length) % items.length)}
-                  className="rounded-full border border-[#0c1a16]/20 px-2.5 py-1.5 text-xs font-bold text-[#0c1a16]/60 transition-colors hover:border-[#0f8a6d] hover:text-[#0f8a6d]"
-                  aria-label="Previous article"
-                >
-                  ←
-                </button>
-                <button
-                  onClick={() => setIdx((i) => (i + 1) % items.length)}
-                  className="rounded-full border border-[#0c1a16]/20 px-2.5 py-1.5 text-xs font-bold text-[#0c1a16]/60 transition-colors hover:border-[#0f8a6d] hover:text-[#0f8a6d]"
-                  aria-label="Next article"
-                >
-                  →
-                </button>
-              </span>
-            </div>
-
-            {/* Progress dots */}
-            <div className="mt-4 flex flex-wrap gap-1">
-              {items.map((_, i) => (
-                <button
-                  key={i}
-                  onClick={() => setIdx(i)}
-                  className={`h-1.5 flex-1 rounded-full transition-all ${
-                    i === idx ? "bg-[#0f8a6d]" : "bg-[#0c1a16]/12 hover:bg-[#0c1a16]/25"
-                  }`}
-                  aria-label={`Article ${i + 1}`}
-                />
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ---------------- Point-count selector ---------------- */
-
-const POINT_CHOICES = Array.from({ length: 16 }, (_, i) => i + 5); // 5…20
-
-function PointCount({
-  value,
-  onChange,
-  dark,
-}: {
-  value: number;
-  onChange: (n: number) => void;
-  dark?: boolean;
-}) {
-  return (
-    <label
-      className={`inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs font-bold transition-colors ${
-        dark
-          ? "border-[#f1f3ee]/25 bg-[#f1f3ee]/10 text-[#f1f3ee]/80"
-          : "border-[#0c1a16]/20 bg-white text-[#0c1a16]/70"
-      }`}
-    >
-      <ListOrdered size={13} className={dark ? "text-[#e8a33d]" : "text-[#0f8a6d]"} />
-      <span className="hidden sm:inline">Points</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className={`cursor-pointer rounded border-0 bg-transparent pr-1 text-xs font-bold outline-none ${
-          dark ? "text-[#f1f3ee]" : "text-[#0c1a16]"
-        }`}
-      >
-        {POINT_CHOICES.map((n) => (
-          <option key={n} value={n} className="text-[#0c1a16]">
-            {n}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
-/* ---------------- Read-aloud ---------------- */
-
-function ReadAloud({ getText, dark }: { getText: () => string; dark?: boolean }) {
-  const [state, setState] = useState<"idle" | "playing" | "paused">("idle");
-  const [rate, setRate] = useState(1);
-  const supported = typeof window !== "undefined" && "speechSynthesis" in window;
-
-  // Never leave speech running when the view changes.
-  useEffect(() => {
-    return () => {
-      try {
-        window.speechSynthesis?.cancel();
-      } catch {
-        /* ignore */
-      }
-    };
-  }, []);
-
-  if (!supported) return null;
-
-  const stop = () => {
-    window.speechSynthesis.cancel();
-    setState("idle");
-  };
-
-  const play = () => {
-    if (state === "paused") {
-      window.speechSynthesis.resume();
-      setState("playing");
-      return;
-    }
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(getText());
-    u.rate = rate;
-    u.onend = () => setState("idle");
-    u.onerror = () => setState("idle");
-    window.speechSynthesis.speak(u);
-    setState("playing");
-  };
-
-  const pause = () => {
-    window.speechSynthesis.pause();
-    setState("paused");
-  };
-
-  const btn = dark
-    ? "border-[#f1f3ee]/25 bg-[#f1f3ee]/10 text-[#f1f3ee]/85 hover:bg-[#f1f3ee]/20"
-    : "border-[#0c1a16]/20 bg-white text-[#0c1a16] hover:border-[#0f8a6d] hover:text-[#0f8a6d]";
-
-  return (
-    <div className="inline-flex items-center gap-1.5">
-      <button
-        onClick={state === "playing" ? pause : play}
-        className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-bold transition-all ${btn}`}
-        title={state === "playing" ? "Pause" : "Read the summary aloud"}
-      >
-        {state === "playing" ? <Pause size={13} /> : <Volume2 size={13} />}
-        {state === "playing" ? "Pause" : state === "paused" ? "Resume" : "Listen"}
-      </button>
-      {state !== "idle" && (
-        <button
-          onClick={stop}
-          className={`rounded-lg border px-2 py-1.5 text-xs font-bold transition-all ${btn}`}
-          title="Stop"
-        >
-          <Square size={11} />
-        </button>
-      )}
-      <select
-        value={rate}
-        onChange={(e) => {
-          setRate(Number(e.target.value));
-          if (state !== "idle") stop();
-        }}
-        className={`cursor-pointer rounded-lg border px-1.5 py-1.5 text-[11px] font-bold outline-none transition-all ${btn}`}
-        title="Playback speed"
-      >
-        {[0.75, 1, 1.25, 1.5].map((r) => (
-          <option key={r} value={r} className="text-[#0c1a16]">
-            {r}×
-          </option>
-        ))}
-      </select>
-    </div>
-  );
-}
-
-/* ---------------- Summary graphics ---------------- */
-
-function SummaryVisuals({
-  terms,
-  positions,
-  numbers,
-  totalPoints,
-}: {
-  terms: { word: string; count: number }[];
-  positions: number[];
-  numbers: string[];
-  totalPoints: number;
-}) {
-  const top = terms.slice(0, 6);
-  const max = Math.max(...top.map((t) => t.count), 1);
-  // Pull the leading figure out of each numeric sentence for a stat card.
-  const figures = numbers
-    .map((s) => {
-      const m = s.match(/(\$?\d[\d,.]*\s*(?:%|percent|million|billion|thousand|trillion)?)/i);
-      return m ? { value: m[1].trim(), context: s } : null;
-    })
-    .filter(Boolean)
-    .slice(0, 4) as { value: string; context: string }[];
-
-  if (!top.length && !positions.length && !figures.length) return null;
-
-  return (
-    <div className="space-y-4">
-      {/* Theme weight bars */}
-      {top.length > 0 && (
-        <div className="rounded-xl border border-[#0c1a16]/12 bg-white p-4">
-          <p className="mb-3 flex items-center gap-1.5 text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#0c1a16]/50">
-            <BarChart3 size={12} /> Theme weight
-          </p>
-          <div className="space-y-2">
-            {top.map((t) => (
-              <div key={t.word} className="flex items-center gap-2.5">
-                <span className="w-24 shrink-0 truncate text-right text-[11px] font-semibold text-[#0c1a16]/70">
-                  {t.word}
-                </span>
-                <div className="h-2.5 flex-1 overflow-hidden rounded-full bg-[#0c1a16]/8">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-[#0f8a6d] to-[#7fd4bd] transition-all duration-700"
-                    style={{ width: `${Math.max(6, (t.count / max) * 100)}%` }}
-                  />
-                </div>
-                <span className="w-6 text-[10px] font-bold tabular-nums text-[#0c1a16]/45">
-                  {t.count}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Coverage map */}
-      {positions.length > 0 && (
-        <div className="rounded-xl border border-[#0c1a16]/12 bg-white p-4">
-          <p className="mb-3 flex items-center gap-1.5 text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#0c1a16]/50">
-            <MapIcon size={12} /> Coverage — where the points came from
-          </p>
-          <div className="relative h-9 rounded-lg bg-gradient-to-r from-[#0f8a6d]/10 via-[#0f8a6d]/5 to-[#e8a33d]/10">
-            {positions.map((p, i) => (
-              <span
-                key={i}
-                className="absolute top-1/2 flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-white bg-[#0c1a16] text-[9px] font-bold text-[#e8a33d] shadow-sm"
-                style={{ left: `${4 + p * 92}%` }}
-                title={`Point ${i + 1} — ${Math.round(p * 100)}% through the document`}
-              >
-                {i + 1}
-              </span>
-            ))}
-          </div>
-          <div className="mt-1.5 flex justify-between text-[10px] font-semibold text-[#0c1a16]/40">
-            <span>start</span>
-            <span>
-              {totalPoints} points spread across the document
-            </span>
-            <span>end</span>
-          </div>
-        </div>
-      )}
-
-      {/* Figure cards */}
-      {figures.length > 0 && (
-        <div className="rounded-xl border border-[#0c1a16]/12 bg-white p-4">
-          <p className="mb-3 flex items-center gap-1.5 text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#0c1a16]/50">
-            <TrendingUp size={12} /> Key figures
-          </p>
-          <div className="grid gap-2 sm:grid-cols-2">
-            {figures.map((f, i) => (
-              <div
-                key={i}
-                className="rounded-lg border border-[#0f8a6d]/25 bg-[#0f8a6d]/8 p-3"
-                title={f.context}
-              >
-                <p className="font-display text-xl font-extrabold text-[#0a5c49]">{f.value}</p>
-                <p className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-[#0c1a16]/60">
-                  {f.context.length > 90 ? f.context.slice(0, 90) + "…" : f.context}
-                </p>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 /* ---------------- Workbench ---------------- */
 
 type WbMode = "paste" | "url" | "file";
@@ -876,7 +431,6 @@ interface WbResult {
   details: string[];
   folded: number;
   tier: string;
-  positions: number[];
   insights: InsightSet;
 }
 
@@ -943,10 +497,9 @@ function Workbench() {
   const [source, setSource] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [runKey, setRunKey] = useState(0);
+  const [targetPoints, setTargetPoints] = useState<number | "auto">("auto");
+  const [variance, setVariance] = useState(0);
   const [expanded, setExpanded] = useState<number | null>(null);
-  const [pointCount, setPointCount] = useState(5);
-  const [variant, setVariant] = useState(0);
-  const lastRun = useRef<{ text: string; label: string } | null>(null);
   const [result, setResult] = useState<WbResult | null>(null);
   const [history, setHistory] = useState<{ title: string; tier: string; words: number; text: string }[]>([]);
   const [copied, setCopied] = useState<string | null>(null);
@@ -977,14 +530,71 @@ function Workbench() {
     window.setTimeout(() => setCopied(null), 1600);
   };
 
-  const runAnalysis = (t: string, label: string, v = 0, n = pointCount) => {
+  const [speaking, setSpeaking] = useState(false);
+  const speechKeepAlive = useRef<number | null>(null);
+
+  const stopReading = () => {
+    if (speechKeepAlive.current !== null) {
+      window.clearInterval(speechKeepAlive.current);
+      speechKeepAlive.current = null;
+    }
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    setSpeaking(false);
+  };
+
+  const readAloud = (points: string[], details: string[]) => {
+    if (!("speechSynthesis" in window)) {
+      alert("Your browser does not support text-to-speech.");
+      return;
+    }
+    // Acts as a toggle: clicking Listen again while it's already reading
+    // should stop it, not stack a second utterance on top.
+    if (speaking) {
+      stopReading();
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+
+    let t = "Main points. " + points.join(" ");
+    if (details.length > 0) t += " Full summary. " + details.join(" ");
+    const u = new SpeechSynthesisUtterance(t);
+    u.onend = stopReading;
+    u.onerror = stopReading;
+
+    // Chrome bug #1: calling speak() in the same tick as cancel() can be a
+    // silent no-op — especially right after a page refresh, before the
+    // speech engine has actually reset. A short delay makes it reliable.
+    window.setTimeout(() => {
+      window.speechSynthesis.speak(u);
+      setSpeaking(true);
+      // Chrome bug #2: utterances longer than ~15s get silently cut off
+      // unless something keeps nudging the engine. Pausing/resuming on an
+      // interval is the standard workaround for long text like a summary.
+      speechKeepAlive.current = window.setInterval(() => {
+        if (!window.speechSynthesis.speaking) return;
+        window.speechSynthesis.pause();
+        window.speechSynthesis.resume();
+      }, 10000);
+    }, 60);
+  };
+
+  // Never leave the browser talking after the Workbench itself goes away.
+  useEffect(() => stopReading, []);
+
+  const runAnalysis = (t: string, label: string, currentTarget: number | "auto" = "auto", currentVar = 0) => {
     setBusy(true);
     setExpanded(null);
-    lastRun.current = { text: t, label };
+    // Any re-analysis (Shuffle, points-count change, a new document) should
+    // never leave narration of the previous result talking over new points
+    // — routed through stopReading() so the Listen/Stop button state and
+    // the keep-alive interval both stay in sync with reality.
+    stopReading();
+    // A fresh document should always start from a clean baseline — only the
+    // explicit Shuffle button should accumulate variance from here on.
+    setVariance(currentVar);
     window.setTimeout(() => {
-      // variant > 0 rotates sentence selection and rephrases, so a
-      // regenerate reads differently while making the same points.
-      const scan = scanDocument(t, n, label, 14, { variant: v, rephrase: v > 0 });
+      const scan = scanDocument(t, currentTarget, label, 14, currentVar);
       const ins = deriveInsights(t, scan.points, scan.details);
       setResult({
         title: label,
@@ -992,7 +602,6 @@ function Workbench() {
         details: scan.details,
         folded: scan.folded,
         tier: scan.tier,
-        positions: scan.positions,
         insights: ins,
       });
       pushHistory(label, scan.tier, ins.stats.words, t);
@@ -1001,22 +610,10 @@ function Workbench() {
     }, 650);
   };
 
-  const regenerate = () => {
-    if (!lastRun.current) return;
-    const v = variant + 1;
-    setVariant(v);
-    runAnalysis(lastRun.current.text, lastRun.current.label, v);
-  };
-
-  const changeCount = (n: number) => {
-    setPointCount(n);
-    if (lastRun.current) runAnalysis(lastRun.current.text, lastRun.current.label, variant, n);
-  };
-
   const runFromText = () => {
     if (text.trim().length < 120) return;
     setSource(null);
-    runAnalysis(text, "Pasted material");
+    runAnalysis(text, "Pasted material", targetPoints, 0);
   };
 
   const runFromUrl = async (targetUrl?: string) => {
@@ -1046,7 +643,7 @@ function Workbench() {
           `https://${lang}.wikipedia.org/w/api.php?action=query&prop=extracts` +
           `&explaintext=1&redirects=1&format=json&origin=*` +
           `&titles=${encodeURIComponent(title)}`;
-        const wr = await fetch(api);
+        const wr = await fetchWithTimeout(api);
         if (!wr.ok) throw new Error("http");
         const json = (await wr.json()) as {
           query?: { pages?: Record<string, { extract?: string; title?: string }> };
@@ -1056,7 +653,7 @@ function Workbench() {
         let outTitle = (page?.title || title).replace(/_/g, " ");
         if (t.length < 200) {
           // Fallback: the REST summary endpoint (also CORS-open).
-          const rr = await fetch(
+          const rr = await fetchWithTimeout(
             `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`
           );
           if (rr.ok) {
@@ -1070,10 +667,10 @@ function Workbench() {
         setText(t);
         setSource(u);
         setUrlState("idle");
-        runAnalysis(t, outTitle);
+        runAnalysis(t, outTitle, targetPoints, 0);
         return;
       }
-      const res = await fetch(u);
+      const res = await fetchWithTimeout(u);
       if (!res.ok) throw new Error("http");
       const html = await res.text();
       const doc = new DOMParser().parseFromString(html, "text/html");
@@ -1083,7 +680,7 @@ function Workbench() {
       setText(t);
       setSource(u);
       setUrlState("idle");
-      runAnalysis(t, parsed.hostname.replace(/^www\./, ""));
+      runAnalysis(t, parsed.hostname.replace(/^www\./, ""), targetPoints, 0);
     } catch (e) {
       setErrMsg(e instanceof Error && e.message ? e.message : "fetch failed");
       setProxyUrl(u);
@@ -1097,7 +694,7 @@ function Workbench() {
     if (!proxyUrl) return;
     setUrlState("loading");
     try {
-      const res = await fetch(`https://r.jina.ai/${proxyUrl}`);
+      const res = await fetchWithTimeout(`https://r.jina.ai/${proxyUrl}`, 12000);
       if (!res.ok) throw new Error("http");
       let t = await res.text();
       t = t
@@ -1112,7 +709,7 @@ function Workbench() {
       setSource(proxyUrl + " (via reader)");
       setUrlState("idle");
       setProxyUrl(null);
-      runAnalysis(t, new URL(proxyUrl).hostname.replace(/^www\./, ""));
+      runAnalysis(t, new URL(proxyUrl).hostname.replace(/^www\./, ""), targetPoints, 0);
     } catch (e) {
       setErrMsg(e instanceof Error && e.message ? e.message : "reader failed");
       setUrlState("error");
@@ -1147,7 +744,7 @@ function Workbench() {
         throw new Error("No readable text found (a scanned-image PDF has none).");
       setText(t);
       setSource(f.name);
-      runAnalysis(t, f.name);
+      runAnalysis(t, f.name, targetPoints, 0);
     } catch (e) {
       setErrMsg(e instanceof Error ? e.message : "Couldn't read that file.");
     }
@@ -1189,23 +786,9 @@ function Workbench() {
       <Collapsible
         id="workbench"
         tone="dark"
-        title="The Workbench — live articles or your own material"
-        hint="trending · paste · URL · upload"
+        title="The Workbench — analyze your own material"
+        hint="paste · URL · upload"
       >
-      <div className="mb-6">
-        <LiveFeed
-          onScan={(t, label) => {
-            setMode("paste");
-            setText(t);
-            setSource(label);
-            runAnalysis(t, label);
-            window.setTimeout(
-              () => document.getElementById("workbench")?.scrollIntoView({ behavior: "smooth", block: "start" }),
-              80
-            );
-          }}
-        />
-      </div>
       <div className="overflow-hidden rounded-2xl border-2 border-[#0c1a16] bg-white shadow-[10px_10px_0_#0c1a16]">
         {/* Console header */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b-2 border-[#0c1a16] bg-[#0c1a16] px-6 py-5 sm:px-8">
@@ -1405,7 +988,7 @@ function Workbench() {
                       onClick={() => {
                         setText(h.text);
                         setSource(h.title);
-                        runAnalysis(h.text, h.title);
+                        runAnalysis(h.text, h.title, targetPoints, 0);
                       }}
                       title={`${h.words.toLocaleString()} words · ${h.tier}`}
                       className="max-w-[190px] truncate rounded-full border border-[#0c1a16]/15 bg-[#f7f9f5] px-3 py-1 text-[11px] font-semibold text-[#0c1a16]/65 transition-all hover:-translate-y-0.5 hover:border-[#0f8a6d] hover:text-[#0f8a6d]"
@@ -1468,11 +1051,6 @@ function Workbench() {
                   <span className="rounded-full bg-[#0c1a16] px-3 py-1 text-xs font-extrabold text-[#e8a33d] shadow-sm">
                     {result.tier}
                   </span>
-                  {variant > 0 && (
-                    <span className="rounded-full bg-[#e8a33d] px-3 py-1 text-xs font-extrabold text-[#0c1a16] shadow-sm">
-                      rewritten v{variant + 1}
-                    </span>
-                  )}
                   {[
                     [`${ins!.stats.words.toLocaleString()}`, "words"],
                     [`${ins!.stats.sentences}`, "sentences"],
@@ -1484,25 +1062,6 @@ function Workbench() {
                       {l}
                     </span>
                   ))}
-                </div>
-
-                {/* Controls: count · listen · regenerate */}
-                <div className="point-in flex flex-wrap items-center gap-2" style={{ animationDelay: "0.1s" }}>
-                  <PointCount value={pointCount} onChange={changeCount} />
-                  <ReadAloud
-                    getText={() =>
-                      `${result.title}. ` +
-                      result.points.map((p, i) => `Point ${i + 1}. ${p}`).join(" ") +
-                      (result.details.length ? ` Full summary. ${result.details.join(" ")}` : "")
-                    }
-                  />
-                  <button
-                    onClick={regenerate}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-[#0c1a16]/20 bg-white px-3 py-1.5 text-xs font-bold text-[#0c1a16] transition-all hover:-translate-y-0.5 hover:border-[#0f8a6d] hover:text-[#0f8a6d]"
-                    title="Re-word the summary using different source sentences"
-                  >
-                    <RefreshCw size={13} /> Regenerate
-                  </button>
                 </div>
 
                 {/* Points with expand */}
@@ -1551,16 +1110,6 @@ function Workbench() {
                     </li>
                   ))}
                 </ol>
-
-                {/* Graphics */}
-                <div className="point-in" style={{ animationDelay: "0.75s" }}>
-                  <SummaryVisuals
-                    terms={ins!.terms}
-                    positions={result.positions}
-                    numbers={ins!.numbers}
-                    totalPoints={result.points.length}
-                  />
-                </div>
 
                 {/* Insight cards */}
                 <div className="grid gap-3 sm:grid-cols-3">
@@ -1625,6 +1174,55 @@ function Workbench() {
 
                 {/* Export & handoff */}
                 <div className="point-in rounded-xl border border-[#0c1a16]/15 bg-white p-4" style={{ animationDelay: "1.4s" }}>
+                  <div className="mb-4 flex flex-wrap items-center gap-3 border-b border-[#0c1a16]/10 pb-4">
+                    <label className="text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#0c1a16]/50">
+                      Points:
+                    </label>
+                    <select
+                      value={targetPoints}
+                      onChange={(e) => {
+                        const val = e.target.value === "auto" ? "auto" : parseInt(e.target.value, 10);
+                        setTargetPoints(val);
+                        if (text && source) runAnalysis(text, source, val, variance);
+                      }}
+                      className="rounded-lg border border-[#0c1a16]/15 bg-[#f7f9f5] px-2 py-1 text-xs font-semibold text-[#0c1a16] focus:border-[#0f8a6d] focus:outline-none"
+                    >
+                      <option value="auto">Auto</option>
+                      {[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20].map((n) => (
+                        <option key={n} value={n}>
+                          {n} pts
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      disabled={busy}
+                      onClick={() => {
+                        if (text && source) {
+                          // Cycle rather than climb forever — bounds the
+                          // escalation instead of letting it grow unbounded.
+                          const nextVar = variance + 1.2 > 3.5 ? 0.8 : variance + 1.2;
+                          runAnalysis(text, source, targetPoints, nextVar);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-[#0c1a16]/20 bg-[#f7f9f5] px-3 py-1.5 text-xs font-bold text-[#0c1a16] transition-all hover:-translate-y-0.5 hover:border-[#0f8a6d] hover:text-[#0f8a6d] disabled:opacity-50 disabled:pointer-events-none"
+                      title="Generates a fresh summary by preferring slightly different sentences."
+                    >
+                      <RefreshCw size={12} className={busy ? "animate-spin" : ""} /> Shuffle
+                    </button>
+                    <button
+                      onClick={() => readAloud(result.points, result.details)}
+                      className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-bold transition-all hover:-translate-y-0.5 ${
+                        speaking
+                          ? "border-[#0f8a6d] bg-[#0f8a6d]/10 text-[#0f8a6d]"
+                          : "border-[#0c1a16]/20 bg-[#f7f9f5] text-[#0c1a16] hover:border-[#0f8a6d] hover:text-[#0f8a6d]"
+                      }`}
+                      title={speaking ? "Stop reading" : "Read aloud via Text-to-Speech"}
+                    >
+                      <Sparkles size={12} className={speaking ? "animate-pulse" : ""} />
+                      {speaking ? "Stop" : "Listen"}
+                    </button>
+                  </div>
+                  
                   <p className="mb-3 text-[10px] font-extrabold uppercase tracking-[0.14em] text-[#0c1a16]/50">
                     Take it with you
                   </p>
@@ -1717,12 +1315,199 @@ function Site() {
     }
   }, [bookmarkletHref]);
 
-  const { points, details, folded } = useMemo(
-    () => scanDocument(SAMPLE.body, 5, SAMPLE.title),
-    []
-  );
   const [scanKey, setScanKey] = useState(0);
   const [allOpen, setAllOpen] = useState(true);
+
+  // Live sample state
+  const [sample, setSample] = useState(INITIAL_SAMPLE);
+  const [loadingSample, setLoadingSample] = useState(false);
+  const [sampleError, setSampleError] = useState<string | null>(null);
+
+  // Recomputes whenever a live trending article replaces the sample —
+  // previously pinned to [] this silently kept showing the original
+  // radiology article's points even after "Load live trending article".
+  const { points, details, folded } = useMemo(
+    () => scanDocument(sample.body, 5, sample.title),
+    [sample]
+  );
+
+  const [sampleSource, setSampleSource] = useState<"mostread" | "worldnews">("mostread");
+  const [sampleStale, setSampleStale] = useState(false);
+
+  type LiveArticle = { title: string; body: string };
+  const LIVE_CACHE_KEY = "summa:live-sample-cache";
+
+  const readCache = (source: "mostread" | "worldnews"): LiveArticle | null => {
+    try {
+      const raw = localStorage.getItem(LIVE_CACHE_KEY + ":" + source);
+      return raw ? (JSON.parse(raw) as LiveArticle) : null;
+    } catch {
+      return null;
+    }
+  };
+  const writeCache = (source: "mostread" | "worldnews", article: LiveArticle) => {
+    try {
+      localStorage.setItem(LIVE_CACHE_KEY + ":" + source, JSON.stringify(article));
+    } catch {
+      /* private mode or full quota — caching is best-effort */
+    }
+  };
+
+  // A small delay-based retry: transient network blips and momentary rate
+  // limits are common on free public APIs, and most resolve within a
+  // second or two. Retrying quietly here means the user only ever sees a
+  // failure once every avenue has genuinely been exhausted.
+  const withRetries = async <T,>(fn: () => Promise<T | null>, attempts = 2, delayMs = 700): Promise<T | null> => {
+    for (let i = 0; i < attempts; i++) {
+      const result = await fn();
+      if (result) return result;
+      if (i < attempts - 1) await new Promise((r) => window.setTimeout(r, delayMs * (i + 1)));
+    }
+    return null;
+  };
+
+  // Pull an article's plaintext straight from Wikipedia's own MediaWiki API
+  // (CORS-enabled, official, no key). Deliberately avoids the third-party
+  // CORS-proxy chain used elsewhere — those free public proxies rate-limit
+  // or go offline often enough that they were the actual cause of this
+  // feature failing outright, not the article sources themselves.
+  //
+  // Two independent endpoints are tried per title: the full-text "extracts"
+  // API first, then the shorter REST summary API as a fallback — they're
+  // operated separately enough that one being degraded doesn't take out
+  // the other.
+  const fetchWikipediaExtract = async (title: string): Promise<LiveArticle | null> => {
+    try {
+      const api =
+        `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1` +
+        `&redirects=1&format=json&origin=*&titles=${encodeURIComponent(title)}`;
+      const res = await fetchWithTimeout(api, 8000);
+      if (res.ok) {
+        const json = (await res.json()) as {
+          query?: { pages?: Record<string, { extract?: string; title?: string }> };
+        };
+        const page = Object.values(json.query?.pages ?? {})[0];
+        const body = (page?.extract || "").replace(/\s+/g, " ").trim();
+        if (body.length >= 400) {
+          return { title: (page?.title || title).replace(/_/g, " "), body };
+        }
+      }
+    } catch {
+      /* fall through to the REST fallback below */
+    }
+    // Fallback: REST summary endpoint. Shorter (lead section only) but a
+    // genuinely separate service — still worth trying before giving up.
+    try {
+      const rest = await fetchWithTimeout(
+        `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`,
+        8000
+      );
+      if (rest.ok) {
+        const rj = (await rest.json()) as { extract?: string; title?: string };
+        const body = (rj.extract || "").replace(/\s+/g, " ").trim();
+        if (body.length >= 200) return { title: rj.title || title.replace(/_/g, " "), body };
+      }
+    } catch {
+      /* both endpoints failed for this title */
+    }
+    return null;
+  };
+
+  const fetchMostRead = async (): Promise<LiveArticle | null> => {
+    // Wikipedia's official Pageviews API — genuinely "most read" (most
+    // viewed encyclopedia articles), CORS-enabled, no key, no proxy.
+    // Pageview stats can lag or briefly 404 for the most recent day, so
+    // several days are tried in order rather than assuming day-2 exists.
+    for (let back = 2; back <= 5; back++) {
+      const d = new Date();
+      d.setUTCDate(d.getUTCDate() - back);
+      const y = d.getUTCFullYear();
+      const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+      const day = String(d.getUTCDate()).padStart(2, "0");
+      const api = `https://wikimedia.org/api/rest_v1/metrics/pageviews/top/en.wikipedia/all-access/${y}/${m}/${day}`;
+      let articles: string[] = [];
+      try {
+        const res = await fetchWithTimeout(api, 8000);
+        if (!res.ok) continue;
+        const json = (await res.json()) as { items?: { articles?: { article: string }[] }[] };
+        articles = (json.items?.[0]?.articles || [])
+          .map((a) => a.article)
+          .filter((a) => !/^(Main_Page|Special:|Wikipedia:|File:|Portal:)/.test(a));
+      } catch {
+        continue;
+      }
+      if (!articles.length) continue;
+      // Skip the top couple (almost always the same evergreen pages) for a
+      // more genuinely "trending" pick, then try a few until one has content.
+      const candidates = articles.slice(2, 18);
+      for (let i = 0; i < 8 && candidates.length; i++) {
+        const idx = Math.floor(Math.random() * candidates.length);
+        const [title] = candidates.splice(idx, 1);
+        const article = await fetchWikipediaExtract(title.replace(/_/g, " "));
+        if (article) return article;
+      }
+    }
+    return null;
+  };
+
+  const fetchWorldNews = async (): Promise<LiveArticle | null> => {
+    // Wikipedia's editor-curated "Current events" portal — a genuine,
+    // continuously updated world-news digest. The main portal page is
+    // tried first; if it's briefly unavailable, today's and yesterday's
+    // dated sub-pages (which always exist as a matter of site convention)
+    // are tried next before falling back further.
+    const targets = ["Portal:Current events"];
+    for (let back = 0; back <= 1; back++) {
+      const d = new Date();
+      d.setUTCDate(d.getUTCDate() - back);
+      const months = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+      ];
+      targets.push(`Portal:Current_events/${months[d.getUTCMonth()]}_${d.getUTCDate()},_${d.getUTCFullYear()}`);
+    }
+    for (const title of targets) {
+      const article = await fetchWikipediaExtract(title);
+      if (article) return article;
+    }
+    return null;
+  };
+
+  const fetchLiveSample = async (source: "mostread" | "worldnews" = sampleSource) => {
+    setLoadingSample(true);
+    setSampleError(null);
+    setSampleStale(false);
+    setSampleSource(source);
+    try {
+      const fetcher = source === "mostread" ? fetchMostRead : fetchWorldNews;
+      const article = await withRetries(fetcher, 2, 800);
+      if (!article) throw new Error("No articles returned.");
+      setSample(article);
+      writeCache(source, article);
+      // Replay the scan-sweep + staggered point reveal for the new article
+      // — this section's whole premise is "watch it scan", so a live
+      // article deserves the same animation as a re-run.
+      setScanKey((k) => k + 1);
+    } catch {
+      // Every live attempt failed — fall back to the last successful fetch
+      // for this feed if one was cached, so the user still sees real
+      // content instead of a dead end, clearly labeled as not fresh.
+      const cached = readCache(source);
+      if (cached) {
+        setSample(cached);
+        setSampleStale(true);
+        setScanKey((k) => k + 1);
+        setSampleError(
+          "Couldn't refresh this feed right now, so showing the last successful pull instead. Try again shortly."
+        );
+      } else {
+        setSampleError(
+          "Couldn't load this feed right now — Wikipedia's public API may be busy. Try again, switch feeds, or hit refresh."
+        );
+      }
+    }
+    setLoadingSample(false);
+  };
 
   /* "Watch it scan" — your-own-material input (paste ≤7.5k words, or any-length file) */
   const [proofMode, setProofMode] = useState<"sample" | "paste" | "file">("sample");
@@ -2114,7 +1899,40 @@ function Site() {
                 Watch it scan — the sample, or your own words
               </h2>
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => fetchLiveSample("mostread")}
+                disabled={loadingSample}
+                className={`inline-flex items-center gap-2 rounded-full border-2 px-4 py-2.5 text-sm font-bold transition-colors disabled:opacity-50 ${
+                  sampleSource === "mostread"
+                    ? "border-[#0f8a6d] bg-[#0f8a6d] text-white"
+                    : "border-[#0f8a6d]/40 bg-[#0f8a6d]/10 text-[#0a4034] hover:bg-[#0f8a6d]/20"
+                }`}
+              >
+                <RefreshCw
+                  size={14}
+                  className={loadingSample && sampleSource === "mostread" ? "animate-spin" : ""}
+                />
+                {loadingSample && sampleSource === "mostread" ? "Loading…" : "Most read"}
+              </button>
+              <button
+                onClick={() => fetchLiveSample("worldnews")}
+                disabled={loadingSample}
+                className={`inline-flex items-center gap-2 rounded-full border-2 px-4 py-2.5 text-sm font-bold transition-colors disabled:opacity-50 ${
+                  sampleSource === "worldnews"
+                    ? "border-[#0f8a6d] bg-[#0f8a6d] text-white"
+                    : "border-[#0f8a6d]/40 bg-[#0f8a6d]/10 text-[#0a4034] hover:bg-[#0f8a6d]/20"
+                }`}
+              >
+                <RefreshCw
+                  size={14}
+                  className={loadingSample && sampleSource === "worldnews" ? "animate-spin" : ""}
+                />
+                {loadingSample && sampleSource === "worldnews" ? "Loading…" : "World news"}
+              </button>
+              {sampleError && (
+                <span className="basis-full text-xs font-semibold text-[#b3402f]">{sampleError}</span>
+              )}
               <button
                 onClick={() => setScanKey((k) => k + 1)}
                 className="inline-flex items-center gap-2 rounded-full border-2 border-[#0c1a16] px-4 py-2.5 text-sm font-bold transition-colors hover:bg-[#0c1a16] hover:text-[#f1f3ee]"
@@ -2243,13 +2061,18 @@ function Site() {
           {(proofMode === "sample" || !proofResult) ? (
           <article className="relative overflow-hidden rounded-2xl border border-[#0c1a16]/12 bg-white p-7 shadow-sm sm:p-10">
             <div className="mb-5 flex flex-wrap items-baseline justify-between gap-2">
-              <h3 className="font-display text-2xl font-bold tracking-tight">{SAMPLE.title}</h3>
-              <span className="text-xs font-semibold text-[#0c1a16]/45">
-                {wordCount(SAMPLE.body)} words · {readTime(SAMPLE.body)} min read
+              <h3 className="font-display text-2xl font-bold tracking-tight">{sample.title}</h3>
+              <span className="flex items-center gap-2 text-xs font-semibold text-[#0c1a16]/45">
+                {sampleStale && (
+                  <span className="rounded-full bg-[#e8a33d]/20 px-2 py-0.5 font-bold text-[#a86f1a]">
+                    cached — refresh failed
+                  </span>
+                )}
+                {wordCount(sample.body)} words · {readTime(sample.body)} min read
               </span>
             </div>
             <div className="relative">
-              <p className="max-w-3xl leading-relaxed text-[#0c1a16]/75">{SAMPLE.body}</p>
+              <p className="max-w-3xl leading-relaxed text-[#0c1a16]/75">{sample.body}</p>
               <div key={`sweep-${scanKey}`} className="pointer-events-none absolute inset-0">
                 <div className="proof-scan absolute left-0 right-0 h-[3px] rounded-full bg-[#0f8a6d] shadow-[0_0_16px_rgba(15,138,109,0.8)]" />
               </div>

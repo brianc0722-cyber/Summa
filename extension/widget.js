@@ -64,15 +64,24 @@
       return true;
     }
 
+    // Masks decimal points ("3.5") before splitting so they can never be
+    // mistaken for a sentence terminator — fixes two bugs found by the test
+    // suite: (1) the base regex silently DROPS text around an unmatched
+    // mid-sentence period like a decimal, and (2) the old "digit+period
+    // means decimal" merge heuristic was too broad and fused unrelated
+    // sentences that simply ended in a number (e.g. "...on day 0.").
+    var DECIMAL_PLACEHOLDER = "\u0000D\u0000";
+
     function sentences(text, minWords) {
-      var t = text.replace(/\s+/g, " ").trim();
+      var protectedText = text.replace(/(\d)\.(\d)/g, "$1" + DECIMAL_PLACEHOLDER + "$2");
+      var t = protectedText.replace(/\s+/g, " ").trim();
       var parts = t.match(/[^.!?]*[.!?]+(?:\s|$)|[^.!?]+$/g) || [];
-      // Re-join fragments split on abbreviations or decimals so points
-      // don't arrive truncated mid-thought.
+      // Re-join fragments split on abbreviations so points don't arrive
+      // truncated mid-thought.
       var merged = [];
       for (var m = 0; m < parts.length; m++) {
         var prev = merged[merged.length - 1];
-        if (prev && (ABBREV.test(prev.trim()) || /\d\.$/.test(prev.trim()))) {
+        if (prev && ABBREV.test(prev.trim())) {
           merged[merged.length - 1] = prev + parts[m];
         } else {
           merged.push(parts[m]);
@@ -80,7 +89,7 @@
       }
       var out = [];
       for (var i = 0; i < merged.length; i++) {
-        var one = merged[i].trim();
+        var one = merged[i].split(DECIMAL_PLACEHOLDER).join(".").trim();
         if (one.split(" ").length >= minWords && usable(one)) out.push(one);
       }
       return out;
@@ -131,34 +140,6 @@
 
     // Report depth scales with the material: a short post gets a tight
     // summary, a long report gets a proportionally fuller one.
-    var OPENERS = /^(however|moreover|furthermore|in addition|additionally|that said|nevertheless|nonetheless|indeed|notably|importantly|of course|in fact|meanwhile|similarly|consequently|therefore|thus|as a result|for example|for instance|in other words|on the other hand|at the same time|in particular|ultimately|overall|finally|first|second|third)\b[,:]?\s+/i;
-    var PHRASES = [
-      [/\bin order to\b/gi, "to"], [/\bdue to the fact that\b/gi, "because"],
-      [/\bfor the purpose of\b/gi, "for"], [/\bin the event that\b/gi, "if"],
-      [/\bwith regard to\b/gi, "about"], [/\bwith respect to\b/gi, "about"],
-      [/\ba large number of\b/gi, "many"], [/\bthe majority of\b/gi, "most"],
-      [/\bat this point in time\b/gi, "now"], [/\bprior to\b/gi, "before"],
-      [/\bsubsequent to\b/gi, "after"], [/\bdespite the fact that\b/gi, "although"],
-      [/\bit is important to note that\b/gi, ""], [/\bit should be noted that\b/gi, ""],
-      [/\bis able to\b/gi, "can"], [/\bare able to\b/gi, "can"],
-      [/\bhas the ability to\b/gi, "can"], [/\bon a regular basis\b/gi, "regularly"],
-      [/\bwhether or not\b/gi, "whether"], [/\beach and every\b/gi, "every"],
-      [/\bin close proximity to\b/gi, "near"], [/\bend result\b/gi, "result"]
-    ];
-
-    // Local, deterministic rewriting — tightens wording without inventing
-    // anything, so a regenerated point says the same thing differently.
-    function paraphrase(sentence) {
-      var s = String(sentence).trim();
-      for (var i = 0; i < 2; i++) s = s.replace(OPENERS, "");
-      s = s.replace(/\s*\([^)]{0,80}\)\s*/g, " ");
-      for (var p = 0; p < PHRASES.length; p++) s = s.replace(PHRASES[p][0], PHRASES[p][1]);
-      s = s.replace(/\s{2,}/g, " ").replace(/\s+([,.;:])/g, "$1").trim();
-      if (s) s = s.charAt(0).toUpperCase() + s.slice(1);
-      if (s && !/[.!?]$/.test(s)) s += ".";
-      return s;
-    }
-
     function depthFor(words, pr) {
       if (words < 250) return { points: 3, support: Math.min(pr.maxSupport, 5), tier: "Brief" };
       if (words < 1200) return { points: 5, support: pr.maxSupport, tier: "Standard" };
@@ -169,12 +150,11 @@
 
     // Two-layer scan: the n main points, then every other informative,
     // non-redundant sentence as the full summary.
-    function scan(text, n, title, pr, variant) {
+    function scan(text, n, title, pr, variance) {
       var list = sentences(text, pr.minWords);
       var totalWords = text.trim() ? text.trim().split(/\s+/).length : 0;
       var depth = depthFor(totalWords, pr);
-      if (!n) n = depth.points;
-      variant = variant || 0;
+      if (!n || n === "auto") n = depth.points;
       var maxSupport = depth.support;
       if (!list.length) return { points: ["No readable text found on this page."], details: [], folded: 0, tier: depth.tier };
       if (list.length <= n) return { points: list, details: [], folded: 0, tier: depth.tier };
@@ -207,6 +187,9 @@
         if (/^(however|therefore|overall|in short|in conclusion|as a result|the study|researchers|scientists|the report)/i.test(sent)) score *= 1.08;
         if (pr.action !== 1 && ACTION_RE.test(sent)) score *= pr.action;
         score *= 1 + Math.min(0.4, titleHits * 0.1);
+        // Clamped so repeated Shuffle clicks can't destabilize scoring.
+        var v = Math.max(0, Math.min(variance || 0, 3.5));
+        if (v > 0) score *= Math.max(0.05, 1 + (Math.random() * v - v / 2));
         if (score > maxScore) maxScore = score;
         return { sent: sent, i: i, score: score, words: uniq, set: toSet(uniq) };
       });
@@ -215,27 +198,16 @@
 
       var byScore = scored.slice().sort(function (a, b) { return b.score - a.score; });
 
-      // Deeper pool so "Regenerate" can pick different sentences.
-      var pool = [];
-      for (var p = 0; p < byScore.length && pool.length < n + 6; p++) {
+      var points = [];
+      for (var p = 0; p < byScore.length && points.length < n; p++) {
         var cand = byScore[p];
         var dup = false;
-        for (var q = 0; q < pool.length; q++) {
-          if (overlapRatio(cand.words, pool[q].set, pool[q].words.length) > 0.55) { dup = true; break; }
+        for (var q = 0; q < points.length; q++) {
+          if (overlapRatio(cand.words, points[q].set, points[q].words.length) > 0.55) { dup = true; break; }
         }
-        if (!dup) pool.push(cand);
+        if (!dup) points.push(cand);
       }
-      if (!pool.length) pool = byScore.slice(0, n);
-
-      var points;
-      if (!variant || pool.length <= n) {
-        points = pool.slice(0, n);
-      } else {
-        var spare = pool.length - n;
-        var offset = ((variant - 1) % spare) + 1;
-        var rest2 = pool.slice(1);
-        points = [pool[0]].concat(rest2.slice(offset)).concat(rest2.slice(0, offset)).slice(0, n);
-      }
+      if (!points.length) points = byScore.slice(0, n);
 
       var pickedIdx = Object.create(null);
       for (var m = 0; m < points.length; m++) pickedIdx[points[m].i] = 1;
@@ -261,12 +233,9 @@
       rest.sort(function (a, b) { return a.i - b.i; });
       points.sort(function (a, b) { return a.i - b.i; });
 
-      var fin = function (a) {
-        return variant ? a.map(paraphrase) : a;
-      };
       return {
-        points: fin(points.map(function (o) { return o.sent; })),
-        details: fin(rest.map(function (o) { return o.sent; })),
+        points: points.map(function (o) { return o.sent; }),
+        details: rest.map(function (o) { return o.sent; }),
         folded: folded,
         tier: depth.tier
       };
@@ -365,9 +334,8 @@
       "#psum-scope button{font-size:11px;font-weight:700;padding:4px 11px;border-radius:999px;border:1px solid #dbe2da;background:#f7f9f5;color:#6b7a74;cursor:pointer;transition:all .15s}",
       "#psum-scope button:hover{border-color:#0f8a6d;color:#0f8a6d}",
       "#psum-scope button.on{background:#0c1a16;color:#fff;border-color:#0c1a16}",
-      "#psum-sel{margin-left:auto;font-size:11px;font-weight:700;padding:4px 8px;border-radius:8px;border:1px solid #dbe2da;background:#f7f9f5;color:#0c1a16;cursor:pointer;max-width:140px}",
-      "#psum-sel:hover,#psum-n:hover{border-color:#0f8a6d}",
-      "#psum-n{font-size:11px;font-weight:700;padding:4px 6px;border-radius:8px;border:1px solid #dbe2da;background:#f7f9f5;color:#0c1a16;cursor:pointer}",
+      "#psum-sel{margin-left:auto;font-size:11px;font-weight:700;padding:4px 8px;border-radius:8px;border:1px solid #dbe2da;background:#f7f9f5;color:#0c1a16;cursor:pointer;max-width:160px}",
+      "#psum-sel:hover{border-color:#0f8a6d}",
       "#psum-urlrow{display:none;gap:6px;margin-bottom:10px}",
       "#psum-urlrow.open{display:flex}",
       "#psum-url{flex:1;min-width:0;font-size:12px;padding:6px 9px;border-radius:8px;border:1px solid #dbe2da;background:#fff;color:#0c1a16;outline:none;font-family:inherit}",
@@ -458,7 +426,9 @@
       ["thread", "Social post / thread"]
     ];
 
-    function render() {
+    function render(_variance) {
+      // Reads host.__psumVariance directly below; the parameter exists only
+      // so call sites reflect intent.
       var scope = host.__psumScope || "page";
       var chosen = host.__psumType || "auto";
       var resolved = chosen === "auto" ? guessType() : chosen;
@@ -473,7 +443,10 @@
         scanTitle = document.title;
       }
       var words = text.trim() ? text.trim().split(/\s+/).length : 0;
-      var result = scan(text, host.__psumN || 0, scanTitle, pr, host.__psumVariant || 0);
+      var ptsVal = document.getElementById("psum-pts") ? document.getElementById("psum-pts").value : "auto";
+      var n = ptsVal === "auto" ? 0 : parseInt(ptsVal, 10);
+      var variance = host.__psumVariance || 0;
+      var result = scan(text, n, scanTitle, pr, variance);
       var pts = result.points;
       var details = result.details;
 
@@ -484,10 +457,6 @@
           TYPE_OPTIONS[oi][1] + "</option>";
       }
 
-      var nOpts = '<option value="0"' + (host.__psumN ? "" : " selected") + ">Auto</option>";
-      for (var nn = 5; nn <= 20; nn++) {
-        nOpts += '<option value="' + nn + '"' + (host.__psumN === nn ? " selected" : "") + ">" + nn + " points</option>";
-      }
       var listHtml = "";
       for (var li = 0; li < pts.length; li++) {
         listHtml += "<li><span>" + (li + 1) + "</span><p>" + esc(pts[li]) + "</p></li>";
@@ -508,8 +477,7 @@
         '<button data-s="page" class="' + (scope === "page" && !host.__psumUrl ? "on" : "") + '" title="Scan the entire page">Entire page</button>' +
         '<button data-s="article" class="' + (scope === "article" && !host.__psumUrl ? "on" : "") + '" title="Scan only the main article region">Article only</button>' +
         '<button id="psum-urltoggle" class="' + (host.__psumUrl ? "on" : "") + '" title="Summarize any URL">From URL</button></div>' +
-        '<select id="psum-sel" title="Content type">' + opts + "</select>" +
-        '<select id="psum-n" title="Number of main points">' + nOpts + "</select></div>" +
+        '<select id="psum-sel" title="Content type">' + opts + "</select></div>" +
         '<div id="psum-urlrow' + (host.__psumUrlRowOpen ? " open" : "") + '"><input id="psum-url" type="url" placeholder="Paste any https:// link and press Fetch" value="' + escAttr(host.__psumUrlDraft || "") + '"><button id="psum-go">Fetch</button></div>' +
         '<div id="psum-meta"><span class="type">' + TYPE_LABEL[resolved] + (chosen === "auto" ? " · auto" : "") + "</span>" +
         '<span class="tier">' + esc(result.tier || "") + "</span><span>" + pts.length + " main points</span>" +
@@ -519,7 +487,15 @@
         (host.__psumUrl ? "Summary of " + esc(hostLabel(host.__psumUrl.href)) : (scope === "page" ? "Whole page scanned — here is what matters" : "Article scanned — here is what matters")) +
         "</p>" + (host.__psumUrl ? '<button id="psum-urlback">← back to this page</button>' : "") + "</div>" +
         '<ol id="psum-list">' + listHtml + "</ol>" + detailHtml + "</div>" +
-        '<div id="psum-foot"><button id="psum-copy">Copy</button><button id="psum-listen">Listen</button><button id="psum-again">Regenerate</button></div>';
+        '<div id="psum-foot">' +
+          '<select id="psum-pts" title="Points count" style="flex:none;width:60px;font-size:12px;font-weight:600;padding:6px;border-radius:9px;border:1px solid #dbe2da;background:#f7f9f5;color:#0c1a16;cursor:pointer">' +
+            '<option value="auto"' + (ptsVal === "auto" ? " selected" : "") + '>Auto</option>' +
+            [5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20].map(function(v){ return '<option value="' + v + '"' + (ptsVal === String(v) ? " selected" : "") + '>' + v + '</option>'; }).join('') +
+          '</select>' +
+          '<button id="psum-speak" title="Read aloud">Listen</button>' +
+          '<button id="psum-copy">Copy</button>' +
+          '<button id="psum-again" title="Rescan for a fresh summary">Shuffle</button>' +
+        '</div>';
 
       var scopeBtns = panel.querySelectorAll("#psum-scope button");
       for (var sb = 0; sb < scopeBtns.length; sb++) {
@@ -549,41 +525,75 @@
         render();
       };
 
-      panel.querySelector("#psum-n").onchange = function () {
-        host.__psumN = Number(this.value) || 0;
-        render();
-      };
-
-      // Regenerate: rotate to different source sentences and rephrase.
-      panel.querySelector("#psum-again").onclick = function () {
-        host.__psumVariant = (host.__psumVariant || 0) + 1;
-        render();
-      };
-
-      // Read aloud via the browser's speech engine.
-      panel.querySelector("#psum-listen").onclick = function () {
-        var b = this;
-        try {
-          if (!window.speechSynthesis) { b.textContent = "N/A"; return; }
-          if (window.speechSynthesis.speaking) {
-            window.speechSynthesis.cancel();
-            b.textContent = "Listen";
-            return;
-          }
-          var say = document.title + ". ";
-          for (var si = 0; si < pts.length; si++) say += "Point " + (si + 1) + ". " + pts[si] + " ";
-          if (details.length) say += "Full summary. " + details.join(" ");
-          var u = new SpeechSynthesisUtterance(say);
-          u.onend = function () { b.textContent = "Listen"; };
-          u.onerror = function () { b.textContent = "Listen"; };
-          window.speechSynthesis.speak(u);
-          b.textContent = "Stop";
-        } catch (e) { b.textContent = "Listen"; }
-      };
+      // Single source of truth for stopping narration, used by every
+      // trigger (Close, Shuffle, points dropdown, and the Listen button
+      // itself) so the button label can never get stuck showing "Stop"
+      // while nothing is actually playing.
+      function stopSpeaking() {
+        if (host.__psumSpeakKeepAlive) {
+          clearInterval(host.__psumSpeakKeepAlive);
+          host.__psumSpeakKeepAlive = null;
+        }
+        if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+        var btn = panel.querySelector("#psum-speak");
+        if (btn) btn.textContent = "Listen";
+      }
 
       panel.querySelector("#psum-close").onclick = function () {
-        try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
         panel.style.display = "none";
+        // Closing the panel shouldn't leave a voice talking with no UI to stop it.
+        stopSpeaking();
+      };
+      var ptsSelect = panel.querySelector("#psum-pts");
+      if (ptsSelect) {
+        ptsSelect.onchange = function () {
+          // Pass current variance so it doesn't shuffle when just changing length
+          stopSpeaking();
+          render(host.__psumVariance);
+        };
+      }
+
+      panel.querySelector("#psum-speak").onclick = function () {
+        if (!("speechSynthesis" in window)) return;
+        var b = panel.querySelector("#psum-speak");
+
+        // Toggle: clicking Listen again while it's reading stops it.
+        if (window.speechSynthesis.speaking) {
+          stopSpeaking();
+          return;
+        }
+
+        window.speechSynthesis.cancel();
+        var t = "Main points. " + pts.join(" ");
+        if (details.length > 0) t += " Full summary. " + details.join(" ");
+        var u = new SpeechSynthesisUtterance(t);
+        u.onend = stopSpeaking;
+        u.onerror = stopSpeaking;
+
+        // Chrome bug: speak() called in the same tick as cancel() (or right
+        // after a page load/refresh, before the engine has reset) can be a
+        // silent no-op. A short delay makes it reliable.
+        setTimeout(function () {
+          window.speechSynthesis.speak(u);
+          if (b) b.textContent = "Stop";
+          // Chrome bug: utterances longer than ~15s get silently cut off
+          // unless something keeps nudging the engine.
+          host.__psumSpeakKeepAlive = setInterval(function () {
+            if (!window.speechSynthesis.speaking) return;
+            window.speechSynthesis.pause();
+            window.speechSynthesis.resume();
+          }, 10000);
+        }, 60);
+      };
+
+      panel.querySelector("#psum-again").onclick = function() {
+        // Cycle rather than climb forever — caps the escalation and resets
+        // to a clean baseline once it wraps, instead of growing unbounded.
+        var next = (host.__psumVariance || 0) + 1.2;
+        host.__psumVariance = next > 3.5 ? 0.8 : next;
+        // A shuffled result shouldn't play over narration of the old one.
+        stopSpeaking();
+        render(host.__psumVariance);
       };
       panel.querySelector("#psum-copy").onclick = function () {
         var b = panel.querySelector("#psum-copy");

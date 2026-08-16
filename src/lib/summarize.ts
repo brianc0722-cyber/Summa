@@ -24,78 +24,6 @@ export interface ScanResult {
   capped: boolean;
   /** Human label for how deep the report went, e.g. "In-depth". */
   tier: string;
-  /** Where each point sits in the document, 0–1 — powers the coverage map. */
-  positions: number[];
-}
-
-/* ---------------- Rephrasing ----------------
- * Deterministic, local rewriting: it compresses wordy constructions and
- * strips throat-clearing openers so a regenerated point reads differently
- * while stating the same thing. Not generative AI — no invention, so the
- * meaning can't drift.
- */
-
-const OPENERS =
-  /^(however|moreover|furthermore|in addition|additionally|that said|nevertheless|nonetheless|indeed|notably|importantly|of course|in fact|meanwhile|similarly|consequently|therefore|thus|as a result|for example|for instance|in other words|on the other hand|at the same time|in particular|ultimately|overall|finally|first|second|third)\b[,:]?\s+/i;
-
-const PHRASES: [RegExp, string][] = [
-  [/\bin order to\b/gi, "to"],
-  [/\bdue to the fact that\b/gi, "because"],
-  [/\bowing to the fact that\b/gi, "because"],
-  [/\bfor the purpose of\b/gi, "for"],
-  [/\bin the event that\b/gi, "if"],
-  [/\bwith regard to\b/gi, "about"],
-  [/\bwith respect to\b/gi, "about"],
-  [/\bin terms of\b/gi, "in"],
-  [/\ba large number of\b/gi, "many"],
-  [/\ba small number of\b/gi, "a few"],
-  [/\bthe majority of\b/gi, "most"],
-  [/\ba significant proportion of\b/gi, "much of"],
-  [/\bat this point in time\b/gi, "now"],
-  [/\bat the present time\b/gi, "now"],
-  [/\bin the near future\b/gi, "soon"],
-  [/\bprior to\b/gi, "before"],
-  [/\bsubsequent to\b/gi, "after"],
-  [/\bin spite of the fact that\b/gi, "although"],
-  [/\bdespite the fact that\b/gi, "although"],
-  [/\bit is important to note that\b/gi, ""],
-  [/\bit should be noted that\b/gi, ""],
-  [/\bit is worth noting that\b/gi, ""],
-  [/\bthere is no doubt that\b/gi, ""],
-  [/\bis able to\b/gi, "can"],
-  [/\bare able to\b/gi, "can"],
-  [/\bhas the ability to\b/gi, "can"],
-  [/\bmake a decision\b/gi, "decide"],
-  [/\bconduct an investigation\b/gi, "investigate"],
-  [/\bprovide assistance\b/gi, "help"],
-  [/\bin close proximity to\b/gi, "near"],
-  [/\bon a regular basis\b/gi, "regularly"],
-  [/\bin the majority of cases\b/gi, "usually"],
-  [/\bwhether or not\b/gi, "whether"],
-  [/\beach and every\b/gi, "every"],
-  [/\bcompletely eliminate\b/gi, "eliminate"],
-  [/\bfuture plans?\b/gi, "plans"],
-  [/\bpast history\b/gi, "history"],
-  [/\bend result\b/gi, "result"],
-  [/\bbasic fundamentals\b/gi, "fundamentals"],
-];
-
-/**
- * Rewrite a sentence into tighter language without changing its claims.
- * Idempotent-ish: running it twice yields the same text, so a second
- * regenerate relies on variant selection rather than further mangling.
- */
-export function paraphrase(sentence: string): string {
-  let s = sentence.trim();
-  // Drop up to two stacked openers ("However, in addition, ...").
-  for (let i = 0; i < 2; i++) s = s.replace(OPENERS, "");
-  // Remove parenthetical asides that aren't load-bearing.
-  s = s.replace(/\s*\([^)]{0,80}\)\s*/g, " ");
-  for (const [re, to] of PHRASES) s = s.replace(re, to);
-  s = s.replace(/\s{2,}/g, " ").replace(/\s+([,.;:])/g, "$1").trim();
-  if (s) s = s.charAt(0).toUpperCase() + s.slice(1);
-  if (s && !/[.!?]$/.test(s)) s += ".";
-  return s;
 }
 
 /**
@@ -146,25 +74,51 @@ function isUsableSentence(s: string): boolean {
 const ABBREV =
   /\b(?:[A-Z]|Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|Mt|vs|etc|e\.g|i\.e|approx|Inc|Ltd|Corp|Co|Dept|Est|Fig|No|Vol|pp|al)\.$/i;
 
-/** Lookbehind-free sentence splitter — runs on every browser. */
-export function splitSentences(text: string): string[] {
-  const raw =
-    text.replace(/\s+/g, " ").trim().match(/[^.!?]*[.!?]+(?:\s|$)|[^.!?]+$/g) ?? [];
+// A NUL-adjacent placeholder that will never occur in real text, used to
+// mask decimal points before splitting so they can never be mistaken for
+// sentence terminators in the first place.
+const DECIMAL_PLACEHOLDER = "\u0000D\u0000";
 
-  // Re-join fragments split on abbreviations or decimals ("Dr. Chen said…",
-  // "rose 3.5 percent") so points don't arrive truncated mid-thought.
+/**
+ * Lookbehind-free sentence splitter — runs on every browser.
+ *
+ * Two bugs were found by the test suite and fixed here:
+ *  1) The base split regex requires a period to be followed by whitespace
+ *     or end-of-string to count as a sentence end. A decimal point like
+ *     "3.5" satisfies neither, so the regex could never complete a valid
+ *     match there — and critically, JS's .match(/g) silently DROPS any
+ *     text it can't match rather than merging it, so real sentence content
+ *     ("Chen reported that revenue rose...") was vanishing entirely.
+ *  2) The old fix-attempt for that ("if a fragment ends in digit + period,
+ *     merge it with the next one") was too broad: it also matched ordinary
+ *     sentences that happen to end in a number ("...on day 0."), silently
+ *     fusing unrelated sentences together.
+ *
+ * The fix: mask every digit-period-digit sequence before splitting at all,
+ * so a decimal point can never be read as a sentence boundary, then
+ * restore it afterward. This makes the digit-based merge heuristic
+ * unnecessary, so it's removed rather than patched further.
+ */
+export function splitSentences(text: string): string[] {
+  const protectedText = text.replace(/(\d)\.(\d)/g, `$1${DECIMAL_PLACEHOLDER}$2`);
+
+  const raw =
+    protectedText.replace(/\s+/g, " ").trim().match(/[^.!?]*[.!?]+(?:\s|$)|[^.!?]+$/g) ?? [];
+
+  // Re-join fragments split on abbreviations ("Dr. Chen said…") so points
+  // don't arrive truncated mid-thought.
   const merged: string[] = [];
   for (const piece of raw) {
     const prev = merged[merged.length - 1];
-    if (prev && (ABBREV.test(prev.trim()) || /\d\.$/.test(prev.trim()))) {
+    if (prev && ABBREV.test(prev.trim())) {
       merged[merged.length - 1] = prev + piece;
     } else {
       merged.push(piece);
     }
   }
-  const matches = merged;
-  return matches
-    .map((s) => s.trim())
+
+  return merged
+    .map((s) => s.split(DECIMAL_PLACEHOLDER).join(".").trim())
     .filter((s) => s.split(" ").length >= 6 && isUsableSentence(s));
 }
 
@@ -179,40 +133,24 @@ function overlapRatio(words: string[], other: Set<string>, otherLen: number): nu
 /**
  * @param n number of main points, or 0 / "auto" to scale with document length
  */
-export interface ScanOptions {
-  /** Bump to re-select alternate wording for the same ideas. */
-  variant?: number;
-  /** Compress wordy phrasing so regenerated points read freshly. */
-  rephrase?: boolean;
-}
-
 export function scanDocument(
   text: string,
   n: number | "auto" = "auto",
   title = "",
   baseSupport = 14,
-  opts: ScanOptions = {}
+  variance = 0
 ): ScanResult {
-  const { variant = 0, rephrase = false } = opts;
   const all = splitSentences(text);
   const totalWords = wordCount(text);
   const depth = depthFor(totalWords, baseSupport);
   const points_n = !n || n === "auto" ? depth.points : n;
   const maxSupport = depth.support;
   const tier = depth.tier;
-  const finish = (arr: string[]) => (rephrase ? arr.map(paraphrase) : arr);
 
   if (all.length === 0)
-    return { points: [], details: [], folded: 0, capped: false, tier, positions: [] };
+    return { points: [], details: [], folded: 0, capped: false, tier };
   if (all.length <= points_n)
-    return {
-      points: finish(all),
-      details: [],
-      folded: 0,
-      capped: false,
-      tier,
-      positions: all.map((_, i) => i / Math.max(all.length - 1, 1)),
-    };
+    return { points: all, details: [], folded: 0, capped: false, tier };
 
   const capped = all.length > MAX_SENTENCES;
   const list = capped ? all.slice(0, MAX_SENTENCES) : all;
@@ -241,6 +179,16 @@ export function scanDocument(
     )
       score *= 1.08;
     score *= 1 + Math.min(0.4, titleHits * 0.1); // stay on subject
+
+    // Shuffle variance for a "fresh" summary of the same material. Clamped
+    // regardless of what the caller passes — without a ceiling, repeated
+    // Shuffle clicks could grow this until scores swing negative and
+    // rankings become unstable rather than merely varied.
+    const v = Math.max(0, Math.min(variance, 3.5));
+    if (v > 0) {
+      score *= Math.max(0.05, 1 + (Math.random() * v - v / 2));
+    }
+    
     if (score > maxScore) maxScore = score;
     return { sentence, index, score, words: unique, set: toSet(unique) };
   });
@@ -251,28 +199,15 @@ export function scanDocument(
   const byScore = [...scored].sort((a, b) => b.score - a.score);
 
   // Layer 1 — main points.
-  // Collect a deeper pool than needed so "regenerate" can pick different
-  // sentences that cover the same ground.
-  const pool: typeof scored = [];
+  const points: typeof scored = [];
   for (const cand of byScore) {
-    if (pool.length >= points_n + 6) break;
-    const dup = pool.some(
+    if (points.length >= points_n) break;
+    const dup = points.some(
       (p) => overlapRatio(cand.words, p.set, p.words.length) > 0.55
     );
-    if (!dup) pool.push(cand);
+    if (!dup) points.push(cand);
   }
-  if (pool.length === 0) pool.push(...byScore.slice(0, points_n));
-
-  let points: typeof scored;
-  if (variant === 0 || pool.length <= points_n) {
-    points = pool.slice(0, points_n);
-  } else {
-    // Keep the strongest point anchored; rotate the remainder.
-    const spare = pool.length - points_n;
-    const offset = ((variant - 1) % spare) + 1;
-    const rest = pool.slice(1);
-    points = [pool[0], ...rest.slice(offset), ...rest.slice(0, offset)].slice(0, points_n);
-  }
+  if (points.length === 0) points.push(...byScore.slice(0, points_n));
 
   // Layer 2 — full summary: informative, non-redundant leftovers.
   const pickedIdx = new Set(points.map((p) => p.index));
@@ -302,13 +237,11 @@ export function scanDocument(
   rest.sort((a, b) => a.index - b.index);
   points.sort((a, b) => a.index - b.index);
 
-  const lastIdx = Math.max(list.length - 1, 1);
   return {
     capped,
     tier,
-    positions: points.map((p) => p.index / lastIdx),
-    points: finish(points.map((p) => p.sentence)),
-    details: finish(rest.map((d) => d.sentence)),
+    points: points.map((p) => p.sentence),
+    details: rest.map((d) => d.sentence),
     folded,
   };
 }

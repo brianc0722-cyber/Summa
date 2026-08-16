@@ -63,13 +63,22 @@ export const WIDGET_SOURCE = `(function () {
       return true;
     }
 
+    // Masks decimal points ("3.5") before splitting so they can never be
+    // mistaken for a sentence terminator — fixes two bugs found by the test
+    // suite: (1) the base regex silently DROPS text around an unmatched
+    // mid-sentence period like a decimal, and (2) the old "digit+period
+    // means decimal" merge heuristic was too broad and fused unrelated
+    // sentences that simply ended in a number (e.g. "...on day 0.").
+    var DECIMAL_PLACEHOLDER = "\\u0000D\\u0000";
+
     function sentences(text, minWords) {
-      var t = text.replace(/\\s+/g, " ").trim();
+      var protectedText = text.replace(/(\\d)\\.(\\d)/g, "$1" + DECIMAL_PLACEHOLDER + "$2");
+      var t = protectedText.replace(/\\s+/g, " ").trim();
       var parts = t.match(/[^.!?]*[.!?]+(?:\\s|$)|[^.!?]+$/g) || [];
       var merged = [];
       for (var m = 0; m < parts.length; m++) {
         var prev = merged[merged.length - 1];
-        if (prev && (ABBREV.test(prev.trim()) || /\\d\\.$/.test(prev.trim()))) {
+        if (prev && ABBREV.test(prev.trim())) {
           merged[merged.length - 1] = prev + parts[m];
         } else {
           merged.push(parts[m]);
@@ -77,7 +86,7 @@ export const WIDGET_SOURCE = `(function () {
       }
       var out = [];
       for (var i = 0; i < merged.length; i++) {
-        var one = merged[i].trim();
+        var one = merged[i].split(DECIMAL_PLACEHOLDER).join(".").trim();
         if (one.split(" ").length >= minWords && usable(one)) out.push(one);
       }
       return out;
@@ -134,11 +143,11 @@ export const WIDGET_SOURCE = `(function () {
       return { points: 14, support: Math.round(pr.maxSupport * 3.5), tier: "Full report" };
     }
 
-    function scan(text, n, title, pr) {
+    function scan(text, n, title, pr, variance) {
       var list = sentences(text, pr.minWords);
       var totalWords = text.trim() ? text.trim().split(/\\s+/).length : 0;
       var depth = depthFor(totalWords, pr);
-      if (!n) n = depth.points;
+      if (!n || n === "auto") n = depth.points;
       var maxSupport = depth.support;
       if (!list.length) return { points: ["No readable text found on this page."], details: [], folded: 0, tier: depth.tier };
       if (list.length <= n) return { points: list, details: [], folded: 0, tier: depth.tier };
@@ -170,6 +179,9 @@ export const WIDGET_SOURCE = `(function () {
         if (/^(however|therefore|overall|in short|in conclusion|as a result|the study|researchers|scientists|the report)/i.test(sent)) score *= 1.08;
         if (pr.action !== 1 && ACTION_RE.test(sent)) score *= pr.action;
         score *= 1 + Math.min(0.4, titleHits * 0.1);
+        // Clamped so repeated Shuffle clicks can't destabilize scoring.
+        var v = Math.max(0, Math.min(variance || 0, 3.5));
+        if (v > 0) score *= Math.max(0.05, 1 + (Math.random() * v - v / 2));
         if (score > maxScore) maxScore = score;
         return { sent: sent, i: i, score: score, words: uniq, set: toSet(uniq) };
       });
@@ -400,7 +412,9 @@ export const WIDGET_SOURCE = `(function () {
       ["thread", "Social post / thread"]
     ];
 
-    function render() {
+    function render(_variance) {
+      // Reads host.__psumVariance directly below; the parameter exists only
+      // so call sites reflect intent — see the comment at its usage.
       var scope = host.__psumScope || "page";
       var chosen = host.__psumType || "auto";
       var resolved = chosen === "auto" ? guessType() : chosen;
@@ -415,7 +429,10 @@ export const WIDGET_SOURCE = `(function () {
         scanTitle = document.title;
       }
       var words = text.trim() ? text.trim().split(/\\s+/).length : 0;
-      var result = scan(text, 0, scanTitle, pr);
+      var ptsVal = document.getElementById("psum-pts") ? document.getElementById("psum-pts").value : "auto";
+      var n = ptsVal === "auto" ? 0 : parseInt(ptsVal, 10);
+      var variance = host.__psumVariance || 0;
+      var result = scan(text, n, scanTitle, pr, variance);
       var pts = result.points;
       var details = result.details;
 
@@ -456,7 +473,15 @@ export const WIDGET_SOURCE = `(function () {
         (host.__psumUrl ? "Summary of " + esc(hostLabel(host.__psumUrl.href)) : (scope === "page" ? "Whole page scanned — here is what matters" : "Article scanned — here is what matters")) +
         "</p>" + (host.__psumUrl ? '<button id="psum-urlback">← back to this page</button>' : "") + "</div>" +
         '<ol id="psum-list">' + listHtml + "</ol>" + detailHtml + "</div>" +
-        '<div id="psum-foot"><button id="psum-copy">Copy</button><button id="psum-again">Rescan</button></div>';
+        '<div id="psum-foot">' +
+          '<select id="psum-pts" title="Points count" style="flex:none;width:60px;font-size:12px;font-weight:600;padding:6px;border-radius:9px;border:1px solid #dbe2da;background:#f7f9f5;color:#0c1a16;cursor:pointer">' +
+            '<option value="auto"' + (ptsVal === "auto" ? " selected" : "") + '>Auto</option>' +
+            [5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20].map(function(v){ return '<option value="' + v + '"' + (ptsVal === String(v) ? " selected" : "") + '>' + v + '</option>'; }).join('') +
+          '</select>' +
+          '<button id="psum-speak" title="Read aloud">Listen</button>' +
+          '<button id="psum-copy">Copy</button>' +
+          '<button id="psum-again" title="Rescan for a fresh summary">Shuffle</button>' +
+        '</div>';
 
       var scopeBtns = panel.querySelectorAll("#psum-scope button");
       for (var sb = 0; sb < scopeBtns.length; sb++) {
@@ -486,8 +511,70 @@ export const WIDGET_SOURCE = `(function () {
         render();
       };
 
-      panel.querySelector("#psum-close").onclick = function () { panel.style.display = "none"; };
-      panel.querySelector("#psum-again").onclick = render;
+      // Single source of truth for stopping narration — used by Close,
+      // Shuffle, the points dropdown, and the Listen button itself so the
+      // label can never get stuck showing "Stop" while nothing plays.
+      function stopSpeaking() {
+        if (host.__psumSpeakKeepAlive) {
+          clearInterval(host.__psumSpeakKeepAlive);
+          host.__psumSpeakKeepAlive = null;
+        }
+        if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+        var btn = panel.querySelector("#psum-speak");
+        if (btn) btn.textContent = "Listen";
+      }
+
+      panel.querySelector("#psum-close").onclick = function () {
+        panel.style.display = "none";
+        stopSpeaking();
+      };
+      var ptsSelect = panel.querySelector("#psum-pts");
+      if (ptsSelect) {
+        ptsSelect.onchange = function () {
+          stopSpeaking();
+          render(host.__psumVariance);
+        };
+      }
+
+      panel.querySelector("#psum-speak").onclick = function () {
+        if (!("speechSynthesis" in window)) return;
+        var b = panel.querySelector("#psum-speak");
+
+        // Toggle: clicking Listen again while it's reading stops it.
+        if (window.speechSynthesis.speaking) {
+          stopSpeaking();
+          return;
+        }
+
+        window.speechSynthesis.cancel();
+        var t = "Main points. " + pts.join(" ");
+        if (details.length > 0) t += " Full summary. " + details.join(" ");
+        var u = new SpeechSynthesisUtterance(t);
+        u.onend = stopSpeaking;
+        u.onerror = stopSpeaking;
+
+        // Chrome bug: speak() called in the same tick as cancel() (or right
+        // after a page load/refresh, before the engine has reset) can be a
+        // silent no-op. A short delay makes it reliable.
+        setTimeout(function () {
+          window.speechSynthesis.speak(u);
+          if (b) b.textContent = "Stop";
+          // Chrome bug: utterances longer than ~15s get silently cut off
+          // unless something keeps nudging the engine.
+          host.__psumSpeakKeepAlive = setInterval(function () {
+            if (!window.speechSynthesis.speaking) return;
+            window.speechSynthesis.pause();
+            window.speechSynthesis.resume();
+          }, 10000);
+        }, 60);
+      };
+
+      panel.querySelector("#psum-again").onclick = function() {
+        var next = (host.__psumVariance || 0) + 1.2;
+        host.__psumVariance = next > 3.5 ? 0.8 : next;
+        stopSpeaking();
+        render(host.__psumVariance);
+      };
       panel.querySelector("#psum-copy").onclick = function () {
         var b = panel.querySelector("#psum-copy");
         var copied = "MAIN POINTS — " + TYPE_LABEL[resolved] + (host.__psumUrl ? " · " + host.__psumUrl.href : "") + "\\n";

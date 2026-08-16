@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "check:parity": "node scripts/check-parity.mjs",
+    "prebuild": "npm run check:parity"
   },
   "dependencies": {
     "clsx": "2.1.1",
@@ -14,7 +17,8 @@
     "lucide-react": "^1.28.0",
     "react": "19.2.6",
     "react-dom": "19.2.6",
-    "tailwind-merge": "3.4.0"
+    "tailwind-merge": "3.4.0",
+    "vitest": "^4.1.10"
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.1.17",

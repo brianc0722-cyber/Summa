@@ -12,7 +12,7 @@ const MANIFEST = {
   short_name: "Summa",
   version: "1.5.0",
   description:
-    "A Summarize button on every page you visit: 5 main points plus a full non-redundant summary. Runs locally in your browser — no account, no tracking, works on Gmail and other CSP-locked sites.",
+    "A Summarize button on every page you visit: 3-20 adaptive main points plus a full non-redundant summary. Runs locally in your browser — no account, no tracking, works on Gmail and other CSP-locked sites.",
   action: { default_title: "Summarize this page" },
   background: { service_worker: "background.js" },
   content_scripts: [
