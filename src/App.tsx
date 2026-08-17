@@ -1331,13 +1331,13 @@ function Site() {
     [sample]
   );
 
-  const [sampleSource, setSampleSource] = useState<"mostread" | "worldnews">("mostread");
+  const [sampleSource, setSampleSource] = useState<"mostread">("mostread");
   const [sampleStale, setSampleStale] = useState(false);
 
   type LiveArticle = { title: string; body: string };
   const LIVE_CACHE_KEY = "summa:live-sample-cache";
 
-  const readCache = (source: "mostread" | "worldnews"): LiveArticle | null => {
+  const readCache = (source: "mostread"): LiveArticle | null => {
     try {
       const raw = localStorage.getItem(LIVE_CACHE_KEY + ":" + source);
       return raw ? (JSON.parse(raw) as LiveArticle) : null;
@@ -1345,7 +1345,7 @@ function Site() {
       return null;
     }
   };
-  const writeCache = (source: "mostread" | "worldnews", article: LiveArticle) => {
+  const writeCache = (source: "mostread", article: LiveArticle) => {
     try {
       localStorage.setItem(LIVE_CACHE_KEY + ":" + source, JSON.stringify(article));
     } catch {
@@ -1473,7 +1473,7 @@ function Site() {
     return null;
   };
 
-  const fetchLiveSample = async (source: "mostread" | "worldnews" = sampleSource) => {
+  const fetchLiveSample = async (source: "mostread" = sampleSource) => {
     setLoadingSample(true);
     setSampleError(null);
     setSampleStale(false);
@@ -1914,21 +1914,6 @@ function Site() {
                   className={loadingSample && sampleSource === "mostread" ? "animate-spin" : ""}
                 />
                 {loadingSample && sampleSource === "mostread" ? "Loading…" : "Most read"}
-              </button>
-              <button
-                onClick={() => fetchLiveSample("worldnews")}
-                disabled={loadingSample}
-                className={`inline-flex items-center gap-2 rounded-full border-2 px-4 py-2.5 text-sm font-bold transition-colors disabled:opacity-50 ${
-                  sampleSource === "worldnews"
-                    ? "border-[#0f8a6d] bg-[#0f8a6d] text-white"
-                    : "border-[#0f8a6d]/40 bg-[#0f8a6d]/10 text-[#0a4034] hover:bg-[#0f8a6d]/20"
-                }`}
-              >
-                <RefreshCw
-                  size={14}
-                  className={loadingSample && sampleSource === "worldnews" ? "animate-spin" : ""}
-                />
-                {loadingSample && sampleSource === "worldnews" ? "Loading…" : "World news"}
               </button>
               {sampleError && (
                 <span className="basis-full text-xs font-semibold text-[#b3402f]">{sampleError}</span>
